@@ -3,3 +3,4 @@ ffmpeg
 requests
 mutagen
 python-dotenv
+flask
