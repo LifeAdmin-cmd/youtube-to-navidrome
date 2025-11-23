@@ -221,7 +221,7 @@ class WorkflowManager:
                     tags = spotify_result["tags"]
                     # 3. Duplicate Check
                     if self.processor.check_duplicate(
-                        self.output_dir, tags["Title"], tags.get("Album", "")
+                        tags["Title"], tags["Artist"], tags.get("Album", "")
                     ):
                         self.tracks[track_uid]["status"] = "skipped"
                         yield json.dumps(

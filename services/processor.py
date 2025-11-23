@@ -1,5 +1,7 @@
 import base64
+import os
 import shutil
+import sqlite3
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -119,26 +121,65 @@ class AudioProcessor:
             return file_path
 
     @staticmethod
-    def check_duplicate(directory: Path, title: str, album: str) -> bool:
-        if not directory.exists():
+    def check_duplicate(title: str, artist: str, album: str = None) -> bool:
+        """
+        Checks if the song already exists in the Navidrome database.
+        Uses environment variable NAVIDROME_DB_PATH for the database location.
+        """
+        db_path_str = os.getenv("NAVIDROME_DB_PATH")
+        if not db_path_str:
+            print("[DuplicateCheck] NAVIDROME_DB_PATH not set. Skipping DB check.")
             return False
 
-        norm_title = Utils.normalize_text(title)
-        norm_album = Utils.normalize_text(album)
+        db_path = Path(db_path_str)
+        if not db_path.exists():
+            print(f"[DuplicateCheck] Database not found at {db_path}. Skipping check.")
+            return False
 
-        for f in directory.glob("*.opus"):
-            try:
-                # Basic optimization
-                if norm_title not in Utils.normalize_text(f.name):
-                    pass
+        try:
+            with sqlite3.connect(db_path) as conn:
+                # Register the normalize function to be used in SQL queries
+                conn.create_function("normalize", 1, Utils.normalize_text)
+                cursor = conn.cursor()
 
-                audio = OggOpus(f)
-                f_titles = [Utils.normalize_text(t) for t in audio.get("title", [])]
-                f_albums = [Utils.normalize_text(a) for a in audio.get("album", [])]
+                # Introspect media_file columns to determine schema structure
+                cursor.execute("PRAGMA table_info(media_file)")
+                columns = [info[1] for info in cursor.fetchall()]
 
-                if norm_title in f_titles:
-                    if not norm_album or norm_album in f_albums:
-                        return True
-            except Exception:
-                continue
-        return False
+                query_parts = ["SELECT 1 FROM media_file m"]
+                joins = []
+                wheres = ["normalize(m.title) = normalize(?)"]
+                params = [title]
+
+                # Handle Artist Check
+                if "artist" in columns:
+                    # Flat schema or cached column
+                    wheres.append("normalize(m.artist) = normalize(?)")
+                    params.append(artist)
+                elif "artist_id" in columns:
+                    # Normalized schema
+                    joins.append("JOIN artist a ON m.artist_id = a.id")
+                    wheres.append("normalize(a.name) = normalize(?)")
+                    params.append(artist)
+
+                # Handle Album Check
+                if album:
+                    if "album" in columns:
+                        wheres.append("normalize(m.album) = normalize(?)")
+                        params.append(album)
+                    elif "album_id" in columns:
+                        joins.append("LEFT JOIN album al ON m.album_id = al.id")
+                        wheres.append("normalize(al.name) = normalize(?)")
+                        params.append(album)
+
+                # Assemble Query
+                full_query = f"{' '.join(query_parts)} {' '.join(joins)} WHERE {' AND '.join(wheres)}"
+
+                cursor.execute(full_query, params)
+                result = cursor.fetchone()
+
+                return result is not None
+
+        except Exception as e:
+            print(f"[DuplicateCheck] Database error: {e}")
+            return False
