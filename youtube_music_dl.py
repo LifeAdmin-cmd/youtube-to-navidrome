@@ -473,6 +473,9 @@ def _best_match_in_album(
     return best_id
 
 
+from typing import Any, Dict, List, Optional
+
+
 def find_spotify_track_by_search(
     query_str: str,
     artist: str = None,
@@ -483,141 +486,87 @@ def find_spotify_track_by_search(
 ) -> Optional[Dict[str, Any]]:
     """
     Refined search function.
-    Uses Title + Uploader (Channel) if available to improve accuracy.
-    Selects the best match from top 10 results based on string similarity.
+    Selects the best match from top 10 results based on word set similarity.
     """
 
-    # --- 1. CLEANING LOGIC ---
-    # Helper function to safely strip brackets iteratively
-    def clean_brackets(text: str) -> str:
-        clean = text
-        # We loop until the string stops changing.
-        # This handles nested brackets like "(Title (Remix))" correctly.
-        while True:
-            prev = clean
-            # Remove (...) - strictly matching pairs
-            clean = re.sub(r"\s*\([^)]*\)", " ", clean)
-            # Remove [...] - strictly matching pairs
-            clean = re.sub(r"\s*\[[^]]*\]", " ", clean)
-            # Remove {...} - strictly matching pairs
-            clean = re.sub(r"\s*\{[^}]*\}", " ", clean)
+    # --- INTERNAL HELPER: Word Match Ratio ---
+    def get_word_match_ratio(text1: str, text2: str) -> float:
+        # Normalize: Lowercase and extract alphanumeric words only
+        words1 = set(re.findall(r"\w+", text1.lower()))
+        words2 = set(re.findall(r"\w+", text2.lower()))
 
-            # Collapse extra spaces
-            clean = " ".join(clean.split())
+        intersection = words1.intersection(words2)
+        total_words = len(words1) + len(words2)
 
-            if clean == prev:
-                break
-        return clean
+        if total_words == 0:
+            return 0.0
+        return (2.0 * len(intersection)) / total_words
 
-    # Prepare base query
-    q = ""
-
-    if artist:
-        q = f'track:"{query_str}" artist:"{artist}"'
-    else:
-        # Try to parse artist/title if it looks like a filename
-        p_artist, p_title = parse_artist_title_from_filename(query_str)
-        if p_artist and p_title:
-            q = f'track:"{p_title}" artist:"{p_artist}"'
-        else:
-            # --- APPLY NEW CLEANING HERE ---
-            clean_query = clean_brackets(query_str)
-
-            # Append YouTube Channel Name to query for better context
-            if uploader:
-                # Clean uploader name (remove generic terms like VEVO or Topic)
-                clean_uploader = re.sub(
-                    r"\s*(VEVO|Topic|Official|Music)\s*",
-                    "",
-                    uploader,
-                    flags=re.IGNORECASE,
-                ).strip()
-                if clean_uploader:
-                    clean_query = f"{clean_query} {clean_uploader}"
-
-            q = clean_query
-
+    # --- 1. PREPARE SEARCH ---
     token = _get_spotify_access_token(client_id, client_secret)
     headers = {"Authorization": f"Bearer {token}"}
 
-    q = f"{query_str} - {uploader}" if uploader else query_str
-    print(f"[Spotify Search] Querying Spotify with: {q}")
+    # Base API URL (using the one from your snippet)
+    search_url = "https://api.spotify.com/v1/search"
 
-    # Increased limit to 10 to widen the net
+    # logic: Try with uploader first if available, otherwise just query
+    q = f"{query_str} - {uploader}" if uploader else query_str
     params = {"q": q, "type": "track", "limit": 10, "market": market}
 
-    resp = requests.get(
-        "https://api.spotify.com/v1/search", headers=headers, params=params
-    )
-    if resp.status_code != 200:
-        return None
+    print(f"[Spotify Search] Querying with: {q}")
 
-    tracks = resp.json().get("tracks", {}).get("items", [])
+    # --- 2. EXECUTE SEARCH ---
+    resp = requests.get(search_url, headers=headers, params=params)
 
-    # Fallback: if strict search failed, try looser search on just title
-    if not tracks:
-        search_term = (
-            p_title if (not artist and "p_title" in locals() and p_title) else query_str
-        )
-        # Apply the same iterative cleaning to the fallback search
-        search_term = clean_brackets(search_term)
+    tracks = []
+    if resp.status_code == 200:
+        tracks = resp.json().get("tracks", {}).get("items", [])
 
-        params["q"] = search_term
-        resp = requests.get(
-            "https://api.spotify.com/v1/search", headers=headers, params=params
-        )
+    # --- 3. FALLBACK SEARCH ---
+    # If strict search (with uploader) failed, try searching just the query string
+    if not tracks and uploader:
+        print("[Spotify Search] No results. Retrying without uploader...")
+        params["q"] = query_str
+        resp = requests.get(search_url, headers=headers, params=params)
         if resp.status_code == 200:
             tracks = resp.json().get("tracks", {}).get("items", [])
 
-            for t in tracks:
-                print(
-                    f"[Spotify Fallback] Candidate: {t.get('name')} by {[a.get('name') for a in t.get('artists', [])]}"
-                )
-
     if not tracks:
         return None
 
-    # --- SIMILARITY CHECK LOOP ---
+    # --- 4. FIND BEST MATCH (Word Set Logic) ---
     print(f"[Spotify Search] Found {len(tracks)} candidates. Comparing similarity...")
 
     best_track = None
     best_score = -1.0
 
-    # Compare against the cleaned query (without the artist/uploader extras) for purity
-    target_text = _normalize_text(clean_brackets(query_str))
+    # We compare the search query against "Artist Name Track Name"
+    target_text = query_str
 
     for track in tracks:
         track_name = track.get("name", "")
         artists = [a.get("name", "") for a in track.get("artists", [])]
         artist_str = " ".join(artists)
 
-        # Compare: "Artist Title" vs Target
-        spotify_text_full = _normalize_text(f"{artist_str} {track_name}")
-        # Compare: "Title" vs Target
-        spotify_text_title = _normalize_text(track_name)
+        # Combine Artist + Track for the searchable text
+        spotify_text_full = f"{artist_str} {track_name}"
 
-        score_full = difflib.SequenceMatcher(
-            None, target_text, spotify_text_full
-        ).ratio()
-        score_title = difflib.SequenceMatcher(
-            None, target_text, spotify_text_title
-        ).ratio()
+        # Calculate score
+        current_score = get_word_match_ratio(target_text, spotify_text_full)
 
-        current_score = max(score_full, score_title)
+        # Debug print (optional)
+        # print(f"Comparing '{target_text}' vs '{spotify_text_full}' = {current_score:.2f}")
 
         if current_score > best_score:
             best_score = current_score
             best_track = track
 
-    top = best_track
-    print(f"[Spotify Search] Selected: '{top['name']}' (Score: {best_score:.2f})")
-    # ----------------------------------
+    if best_track:
+        print(
+            f"[Spotify Search] Selected: '{best_track['name']}' (Score: {best_score:.2f})"
+        )
 
-    if top.get("type") == "album":
-        chosen_id = _best_match_in_album(top.get("id"), query_str, token, market)
-        return {"id": chosen_id} if chosen_id else None
-
-    return top
+    return best_track
 
 
 def get_spotify_tags_from_search(
