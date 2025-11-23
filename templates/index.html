@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>YouTube to Music Processor</title>
+    <title>YouTube to Navidrome</title>
     <style>
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 700px; margin: 40px auto; padding: 20px; background-color: #f0f2f5; color: #333; }
         h1 { text-align: center; color: #2c3e50; }
@@ -14,9 +14,18 @@
         input[type="text"] { width: 100%; padding: 12px; margin-bottom: 15px; box-sizing: border-box; border: 2px solid #eee; border-radius: 6px; font-size: 16px; transition: border 0.3s; }
         input[type="text"]:focus { border-color: #1db954; outline: none; }
         
-        button { width: 100%; padding: 12px; background-color: #1db954; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 16px; font-weight: bold; transition: background 0.2s; }
-        button:hover { background-color: #1ed760; }
-        button:disabled { background-color: #ccc; cursor: not-allowed; }
+        /* Buttons */
+        .btn-group { display: flex; gap: 10px; }
+        
+        button { width: 100%; padding: 12px; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 16px; font-weight: bold; transition: background 0.2s; }
+        button:disabled { background-color: #ccc !important; cursor: not-allowed; }
+
+        #startBtn { background-color: #1db954; }
+        #startBtn:hover:not(:disabled) { background-color: #1ed760; }
+
+        /* NEW: Cancel Button Styles */
+        #cancelBtn { background-color: #dc3545; }
+        #cancelBtn:hover:not(:disabled) { background-color: #c82333; }
 
         /* Progress Bar */
         .progress-container { width: 100%; background-color: #e0e0e0; border-radius: 6px; margin: 25px 0 10px 0; overflow: hidden; display: none; }
@@ -31,6 +40,7 @@
         .status-error { color: #721c24; background-color: #f8d7da; border-left: 4px solid #dc3545; }
         .status-skipped { color: #856404; background-color: #fff3cd; border-left: 4px solid #ffc107; }
         .status-finished { font-weight: bold; text-align: center; justify-content: center; background-color: #e8f5e9; }
+        .status-cancelled { color: #721c24; background-color: #f8d7da; border-left: 4px solid #dc3545; font-weight: bold; }
 
     </style>
 </head>
@@ -41,20 +51,27 @@
     <div class="card">
         <label for="url">Paste YouTube URL:</label>
         <input type="text" id="url" placeholder="https://www.youtube.com/..." required>
-        <button onclick="startProcess()" id="startBtn">Start Processing</button>
+        
+        <div class="btn-group">
+            <button onclick="startProcess()" id="startBtn">Start Processing</button>
+            <button onclick="cancelProcess()" id="cancelBtn" disabled>Cancel</button>
+        </div>
 
         <div class="progress-container" id="progressContainer">
             <div class="progress-bar" id="progressBar">0%</div>
         </div>
 
         <div class="log-container" id="logContainer">
-            </div>
+        </div>
     </div>
 
     <script>
+        let eventSource = null; // Store reference to close it later
+
         function startProcess() {
             const urlInput = document.getElementById('url');
-            const btn = document.getElementById('startBtn');
+            const startBtn = document.getElementById('startBtn');
+            const cancelBtn = document.getElementById('cancelBtn');
             const logContainer = document.getElementById('logContainer');
             const progressContainer = document.getElementById('progressContainer');
             const progressBar = document.getElementById('progressBar');
@@ -62,43 +79,42 @@
             const url = urlInput.value;
             if (!url) { alert("Please enter a URL"); return; }
 
-            // Reset UI
-            btn.disabled = true;
-            btn.innerText = "Processing...";
+            // UI Reset
+            startBtn.disabled = true;
+            cancelBtn.disabled = false; // Enable Cancel
+            startBtn.innerText = "Processing...";
+            
             logContainer.innerHTML = "";
             progressBar.style.width = "0%";
             progressBar.innerText = "0%";
             progressContainer.style.display = "block";
 
-            // Open connection to Python
-            // encodeURIComponent ensures special characters in the URL don't break the link
-            const eventSource = new EventSource(`/stream?url=${encodeURIComponent(url)}`);
+            // Close any existing connection
+            if (eventSource) eventSource.close();
+
+            // Open connection
+            eventSource = new EventSource(`/stream?url=${encodeURIComponent(url)}`);
 
             eventSource.onmessage = function(event) {
-                // Parse the JSON sent from Python
                 const data = JSON.parse(event.data);
 
-                // 1. Update Progress Bar
-                if (data.progress) {
+                // 1. Update Progress
+                if (data.progress !== undefined) {
                     progressBar.style.width = data.progress + "%";
                     progressBar.innerText = data.progress + "%";
                 }
 
-                // 2. Create Log Entry
+                // 2. Logs
                 if (data.message) {
                     const div = document.createElement('div');
                     div.className = `log-entry status-${data.status}`;
                     div.innerText = data.message;
-                    
-                    // Add new log to top
                     logContainer.insertBefore(div, logContainer.firstChild);
                 }
 
-                // 3. Check if finished
-                if (data.status === "finished" || data.status === "fatal_error") {
-                    eventSource.close(); // Stop listening
-                    btn.disabled = false;
-                    btn.innerText = "Start Processing";
+                // 3. Handle End States (Finished, Error, or Cancelled)
+                if (["finished", "fatal_error", "cancelled"].includes(data.status)) {
+                    stopEventStream();
                 }
             };
 
@@ -107,11 +123,40 @@
                 div.className = "log-entry status-error";
                 div.innerText = "Connection lost or server error.";
                 logContainer.insertBefore(div, logContainer.firstChild);
-                
-                eventSource.close();
-                btn.disabled = false;
-                btn.innerText = "Start Processing";
+                stopEventStream();
             };
+        }
+
+        function cancelProcess() {
+            const cancelBtn = document.getElementById('cancelBtn');
+            cancelBtn.disabled = true; // Prevent double clicking
+            cancelBtn.innerText = "Cancelling...";
+
+            // Send signal to backend
+            fetch('/cancel', { method: 'POST' })
+                .then(response => response.json())
+                .then(data => {
+                    console.log("Cancel signal sent");
+                    // We don't close the stream here immediately. 
+                    // We wait for the backend to send the "cancelled" message via SSE 
+                    // to ensure cleanup is confirmed.
+                })
+                .catch(err => console.error("Error sending cancel signal:", err));
+        }
+
+        function stopEventStream() {
+            if (eventSource) {
+                eventSource.close();
+                eventSource = null;
+            }
+            const startBtn = document.getElementById('startBtn');
+            const cancelBtn = document.getElementById('cancelBtn');
+            
+            startBtn.disabled = false;
+            startBtn.innerText = "Start Processing";
+            
+            cancelBtn.disabled = true;
+            cancelBtn.innerText = "Cancel";
         }
     </script>
 

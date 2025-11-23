@@ -1,14 +1,21 @@
 import json
 
 from dotenv import load_dotenv
-from flask import Flask, Response, render_template, request, stream_with_context
+from flask import (
+    Flask,
+    Response,
+    jsonify,
+    render_template,
+    request,
+    stream_with_context,
+)
 
-from youtube_music_dl import process_input_url
+# Import the cancel function along with the processor
+from youtube_music_dl import process_input_url, trigger_cancellation
 
 load_dotenv()
 
 app = Flask(__name__)
-# No secret_key needed for this approach as we aren't using Flash anymore
 
 
 @app.route("/")
@@ -18,7 +25,6 @@ def index():
 
 @app.route("/stream")
 def stream():
-    # Get URL from the Javascript query parameters
     youtube_url = request.args.get("url")
 
     if not youtube_url:
@@ -29,13 +35,19 @@ def stream():
         )
 
     def generate():
-        # We loop through your generator function
+        # The generator now yields "cancelled" status if interrupted
         for update_json in process_input_url(youtube_url):
-            # SSE format requires "data: <message>\n\n"
             yield f"data: {update_json}\n\n"
 
-    # stream_with_context keeps the request active while the loop runs
     return Response(stream_with_context(generate()), mimetype="text/event-stream")
+
+
+# --- NEW ROUTE ---
+@app.route("/cancel", methods=["POST"])
+def cancel():
+    """Endpoint to trigger the cancellation event."""
+    trigger_cancellation()
+    return jsonify({"status": "ok", "message": "Cancellation signal sent."})
 
 
 if __name__ == "__main__":

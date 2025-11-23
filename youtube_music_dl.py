@@ -6,6 +6,7 @@ import re
 import shutil
 import string
 import subprocess
+import threading
 import unicodedata
 import urllib.error
 import urllib.parse
@@ -22,9 +23,77 @@ from mutagen.oggopus import OggOpus
 # Load environment variables
 load_dotenv()
 
+
+# Global flag to signal cancellation
+CANCEL_EVENT = threading.Event()
+
+
+class OperationCancelled(Exception):
+    """Custom exception to stop processing immediately."""
+
+    pass
+
+
+def check_cancel():
+    """Helper to check status and raise exception if cancelled."""
+    if CANCEL_EVENT.is_set():
+        raise OperationCancelled("Operation cancelled by user.")
+
+
 # ==========================================
 # PART 1: SponsorBlock & Cutting Logic
 # ==========================================
+
+
+def trigger_cancellation():
+    """
+    1. Sets the cancel flag.
+    2. Scans the output directory for temporary/incomplete files and deletes them.
+    """
+    print("[System] Cancellation triggered...")
+    CANCEL_EVENT.set()
+
+    # Wait a moment to ensure processes release file locks
+    import time
+
+    time.sleep(1)
+
+    env_dir = os.getenv("output_directory")
+    out_path = Path(env_dir) if env_dir else Path(".")
+
+    # Cleanup Logic:
+    # We assume completed files are renamed to "Artist - Title.opus".
+    # Incomplete files often have the YouTube ID (alphanumeric) or .part extensions.
+
+    # 1. Clean yt-dlp temp files (.part, .ytdl, .f123, etc)
+    extensions = ["*.part", "*.ytdl", "*.f*", "*.temp"]
+    for ext in extensions:
+        for temp_file in out_path.glob(ext):
+            try:
+                temp_file.unlink()
+                print(f"[Cleanup] Deleted temp file: {temp_file.name}")
+            except Exception:
+                pass
+
+    # 2. Clean untagged OPUS files (files that haven't been renamed yet)
+    # Strategy: If the filename looks like a YouTube ID (matches regex), delete it.
+    # This prevents deleting "Linkin Park - Numb.opus" but deletes "dQw4w9WgXcQ.opus"
+    for opus_file in out_path.glob("*.opus"):
+        # If filename contains underscores or is just 11 chars (common YT ID length),
+        # or ends in "_cut.opus", it is likely a work-in-progress.
+        if (
+            re.search(r"\[[a-zA-Z0-9_-]{11}\]", opus_file.name)  # Has ID in brackets
+            or "_cut" in opus_file.name  # Is a cut segment
+            or len(opus_file.stem) == 11
+        ):  # Is just an ID
+
+            try:
+                opus_file.unlink()
+                print(f"[Cleanup] Deleted incomplete audio: {opus_file.name}")
+            except Exception:
+                pass
+
+    print("[System] Cleanup complete.")
 
 
 def get_sponsorblock_segments(
@@ -133,10 +202,11 @@ def download_and_cut(
     audio_format: str = "opus",
     video_info: Optional[Dict] = None,
 ) -> Path:
+    check_cancel()  # Check before starting
+
     out_path = out_dir
     out_path.mkdir(parents=True, exist_ok=True)
 
-    # Use provided info or fetch if missing
     if not video_info:
         with ytdlp.YoutubeDL({"quiet": True}) as ydl:
             video_info = ydl.extract_info(url, download=False)
@@ -145,13 +215,21 @@ def download_and_cut(
     duration = video_info["duration"]
     title_safe = _sanitize_filename(video_info["title"])
 
+    # --- NEW: Progress Hook to interrupt download ---
+    def progress_hook(d):
+        if CANCEL_EVENT.is_set():
+            raise OperationCancelled("Download aborted by user.")
+
     print("--- 1. Downloading Original Audio ---")
     ydl_opts = {
-        "outtmpl": str(out_path / "%(title)s.%(ext)s"),
+        "outtmpl": str(
+            out_path / "%(title)s [%(id)s].%(ext)s"
+        ),  # Added ID to filename to help cleanup identification
         "noplaylist": True,
         "quiet": True,
         "format": "bestaudio/best",
         "overwrites": True,
+        "progress_hooks": [progress_hook],  # <--- ATTACH HOOK HERE
         "postprocessors": [
             {
                 "key": "FFmpegExtractAudio",
@@ -162,19 +240,37 @@ def download_and_cut(
     }
 
     with ytdlp.YoutubeDL(ydl_opts) as ydl:
-        # We download using the ID to ensure we catch the file we expect
-        ydl.download([url])
-        # Calculate expected filename based on sanitize template
-        downloaded_file = out_path / f"{title_safe}.{audio_format}"
+        try:
+            ydl.download([url])
+        except Exception as e:
+            # If it was our cancellation, re-raise it
+            if CANCEL_EVENT.is_set():
+                raise OperationCancelled("Download cancelled")
+            raise e
 
-    # Check if file exists, sometimes ytdlp naming varies slightly
+        # Calculate expected filename
+        # yt-dlp naming with the ID included:
+        downloaded_file = out_path / f"{title_safe} [{video_id}].{audio_format}"
+
+    check_cancel()  # Check after download
+
+    # Check if file exists
     if not downloaded_file.exists():
-        # Fallback: find the most recently modified file in dir
-        downloaded_file = max(out_path.glob(f"*.{audio_format}"), key=os.path.getctime)
+        # Fallback search
+        candidates = list(out_path.glob(f"*{video_id}*.{audio_format}"))
+        if candidates:
+            downloaded_file = candidates[0]
+        else:
+            # Last ditch: most recent
+            downloaded_file = max(
+                out_path.glob(f"*.{audio_format}"), key=os.path.getctime
+            )
 
     print(f"--- 2. Fetching Cuts for ID: {video_id} ---")
     categories = ["music_offtopic", "intro", "outro", "selfpromo", "interaction"]
     bad_segments = get_sponsorblock_segments(video_id, categories)
+
+    check_cancel()  # Check before processing
 
     print("--- 3. Calculating Cuts ---")
     good_segments = invert_segments(duration, bad_segments)
@@ -192,9 +288,13 @@ def download_and_cut(
     final_file = out_path / f"{base_name}_cut.{audio_format}"
 
     try:
+        check_cancel()
         cut_audio_manually(downloaded_file, final_file, good_segments)
-        downloaded_file.unlink()  # Remove original
-        final_file.rename(downloaded_file)  # Rename cut to original name
+
+        # cleanup original
+        downloaded_file.unlink()
+        final_file.rename(downloaded_file)
+
         print(f"--- Success! Saved to: {downloaded_file} ---")
         return downloaded_file
 
@@ -813,12 +913,9 @@ def _process_single_video(
 
 
 def process_input_url(url: str) -> Iterator[str]:
-    """
-    Main Generator Entrypoint.
-    Yields JSON updates for the UI.
-    """
+    # 1. RESET the flag at the start of a new request
+    CANCEL_EVENT.clear()
 
-    # Send initial finding message
     yield json.dumps(
         {"status": "processing", "message": "Analyzing URL...", "progress": 0}
     )
@@ -833,22 +930,20 @@ def process_input_url(url: str) -> Iterator[str]:
     is_playlist = False
 
     try:
+        check_cancel()  # Check immediately
         with ytdlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
 
         if "entries" in info:
             is_playlist = True
             entries = list(info["entries"])
-            yield json.dumps(
-                {
-                    "status": "processing",
-                    "message": f"Playlist detected: {len(entries)} items.",
-                    "progress": 0,
-                }
-            )
         else:
             entries = [info]
 
+    except OperationCancelled:
+        trigger_cancellation()  # Run cleanup
+        yield json.dumps({"status": "cancelled", "message": "Operation cancelled."})
+        return
     except Exception as e:
         yield json.dumps(
             {"status": "fatal_error", "message": f"Failed to parse URL: {e}"}
@@ -857,35 +952,52 @@ def process_input_url(url: str) -> Iterator[str]:
 
     total_count = len(entries)
 
-    # Loop through all videos
+    # --- NEW: Notify webapp about playlist count ---
+    if is_playlist:
+        yield json.dumps(
+            {
+                "status": "processing",
+                "message": f"Playlist detected. Found {total_count} songs in queue.",
+                "progress": 0,
+            }
+        )
+    # -----------------------------------------------
+
     for index, entry in enumerate(entries):
-        if not entry:
-            continue
+        try:
+            check_cancel()  # Check before every video
 
-        # Calculate current progress percentage
-        current_percent = int((index / total_count) * 100)
+            if not entry:
+                continue
 
-        # Get URL
-        video_url = entry.get("url")
-        if not video_url and entry.get("id"):
-            video_url = f"https://www.youtube.com/watch?v={entry.get('id')}"
+            current_percent = int((index / total_count) * 100)
+            video_url = entry.get("url")
+            if not video_url and entry.get("id"):
+                video_url = f"https://www.youtube.com/watch?v={entry.get('id')}"
 
-        if not video_url:
-            continue
+            if not video_url:
+                continue
 
-        # Determine if we have full info (single video) or need to fetch (playlist)
-        # For single video, 'entry' is the full info. For playlist, it's flat info.
-        pre_info = entry if not is_playlist else None
+            pre_info = entry if not is_playlist else None
 
-        # Run the single video processor and yield its messages
-        # We catch the yields from _process_single_video and re-yield them with progress attached
-        for update_json in _process_single_video(video_url, pre_fetched_info=pre_info):
-            data = json.loads(update_json)
-            # Inject global progress
-            data["progress"] = current_percent
-            yield json.dumps(data)
+            # Process video and catch cancellation bubbling up
+            for update_json in _process_single_video(
+                video_url, pre_fetched_info=pre_info
+            ):
+                check_cancel()  # Check inside the loop
 
-    # Final success message
+                data = json.loads(update_json)
+                data["progress"] = current_percent
+                yield json.dumps(data)
+
+        except OperationCancelled:
+            # User hit cancel
+            trigger_cancellation()  # Ensure cleanup runs
+            yield json.dumps(
+                {"status": "cancelled", "message": "Stopped by user. Cleaning up..."}
+            )
+            return
+
     yield json.dumps(
         {"status": "finished", "message": "All operations completed!", "progress": 100}
     )
