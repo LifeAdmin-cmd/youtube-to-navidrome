@@ -17,7 +17,7 @@ load_dotenv()
 
 app = Flask(__name__)
 
-# Initialize the manager globally so both routes access the same instance
+# Initialize the manager globally
 manager = WorkflowManager()
 
 
@@ -38,8 +38,6 @@ def stream():
         )
 
     def generate():
-        # manager.process_url yields JSON strings directly
-        # We wrap them in the SSE "data: ... \n\n" format
         for update_json in manager.process_url(youtube_url):
             yield f"data: {update_json}\n\n"
 
@@ -48,15 +46,34 @@ def stream():
 
 @app.route("/cancel", methods=["POST"])
 def cancel():
-    """Endpoint to trigger the cancellation event."""
-    # We set the event flag inside the global manager instance
     manager.cancel_event.set()
-
-    # Optional: You can explicitly call cleanup here,
-    # though the workflow usually handles it when it catches the event.
-    # manager.cleanup()
-
     return jsonify({"status": "ok", "message": "Cancellation signal sent."})
+
+
+@app.route("/api/candidates/<track_uid>", methods=["GET"])
+def get_candidates(track_uid):
+    """Returns the list of Spotify candidates for a specific download."""
+    track = manager.tracks.get(track_uid)
+    if not track:
+        return jsonify({"error": "Track not found"}), 404
+    return jsonify({"candidates": track["candidates"]})
+
+
+@app.route("/api/update_tag", methods=["POST"])
+def update_tag():
+    """Updates the tags for a file using a new Spotify ID."""
+    data = request.json
+    track_uid = data.get("track_uid")
+    spotify_id = data.get("spotify_id")
+
+    if not track_uid or not spotify_id:
+        return jsonify({"error": "Missing parameters"}), 400
+
+    try:
+        result = manager.update_track_tags(track_uid, spotify_id)
+        return jsonify({"status": "ok", "result": result})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 if __name__ == "__main__":

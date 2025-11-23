@@ -5,42 +5,48 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>YouTube to Navidrome</title>
     <style>
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 700px; margin: 40px auto; padding: 20px; background-color: #f0f2f5; color: #333; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 800px; margin: 40px auto; padding: 20px; background-color: #f0f2f5; color: #333; }
         h1 { text-align: center; color: #2c3e50; }
         
-        /* Card Style */
-        .card { background: white; padding: 30px; border-radius: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); }
+        .card { background: white; padding: 30px; border-radius: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); margin-bottom: 20px; }
         
-        input[type="text"] { width: 100%; padding: 12px; margin-bottom: 15px; box-sizing: border-box; border: 2px solid #eee; border-radius: 6px; font-size: 16px; transition: border 0.3s; }
+        input[type="text"] { width: 100%; padding: 12px; margin-bottom: 15px; box-sizing: border-box; border: 2px solid #eee; border-radius: 6px; font-size: 16px; }
         input[type="text"]:focus { border-color: #1db954; outline: none; }
         
-        /* Buttons */
         .btn-group { display: flex; gap: 10px; }
-        
-        button { width: 100%; padding: 12px; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 16px; font-weight: bold; transition: background 0.2s; }
+        button { width: 100%; padding: 12px; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 16px; font-weight: bold; }
         button:disabled { background-color: #ccc !important; cursor: not-allowed; }
-
         #startBtn { background-color: #1db954; }
         #startBtn:hover:not(:disabled) { background-color: #1ed760; }
-
-        /* NEW: Cancel Button Styles */
         #cancelBtn { background-color: #dc3545; }
         #cancelBtn:hover:not(:disabled) { background-color: #c82333; }
 
-        /* Progress Bar */
         .progress-container { width: 100%; background-color: #e0e0e0; border-radius: 6px; margin: 25px 0 10px 0; overflow: hidden; display: none; }
         .progress-bar { width: 0%; height: 20px; background-color: #1db954; text-align: center; line-height: 20px; color: white; font-size: 12px; transition: width 0.5s ease; }
 
-        /* Logs */
-        .log-container { margin-top: 20px; max-height: 300px; overflow-y: auto; border-top: 1px solid #eee; }
-        .log-entry { padding: 10px; border-bottom: 1px solid #f9f9f9; font-size: 14px; display: flex; align-items: center; }
-        
-        /* Status Colors */
-        .status-success { color: #155724; background-color: #d4edda; border-left: 4px solid #28a745; }
-        .status-error { color: #721c24; background-color: #f8d7da; border-left: 4px solid #dc3545; }
-        .status-skipped { color: #856404; background-color: #fff3cd; border-left: 4px solid #ffc107; }
-        .status-finished { font-weight: bold; text-align: center; justify-content: center; background-color: #e8f5e9; }
-        .status-cancelled { color: #721c24; background-color: #f8d7da; border-left: 4px solid #dc3545; font-weight: bold; }
+        .log-container { max-height: 200px; overflow-y: auto; border-top: 1px solid #eee; margin-top: 15px; font-size: 14px; }
+        .log-entry { padding: 5px; border-bottom: 1px solid #f9f9f9; }
+        .status-success { color: #155724; background-color: #d4edda; }
+        .status-error { color: #721c24; background-color: #f8d7da; }
+
+        /* Table Styles */
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+        th, td { padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }
+        th { background-color: #f8f9fa; font-weight: 600; }
+        .edit-btn { background-color: #007bff; padding: 6px 12px; font-size: 14px; width: auto; }
+        .edit-btn:hover { background-color: #0056b3; }
+
+        /* Modal Styles */
+        .modal { display: none; position: fixed; z-index: 1; left: 0; top: 0; width: 100%; height: 100%; overflow: auto; background-color: rgba(0,0,0,0.5); }
+        .modal-content { background-color: #fff; margin: 10% auto; padding: 20px; border-radius: 10px; width: 80%; max-width: 600px; box-shadow: 0 5px 15px rgba(0,0,0,0.3); }
+        .close { color: #aaa; float: right; font-size: 28px; font-weight: bold; cursor: pointer; }
+        .candidate-item { display: flex; align-items: center; padding: 10px; border-bottom: 1px solid #eee; cursor: pointer; }
+        .candidate-item:hover { background-color: #f1f1f1; }
+        .candidate-img { width: 50px; height: 50px; margin-right: 15px; border-radius: 4px; object-fit: cover; }
+        .candidate-info { flex-grow: 1; }
+        .candidate-title { font-weight: bold; display: block; }
+        .candidate-artist { font-size: 14px; color: #666; }
+        .candidate-score { font-size: 12px; color: #1db954; float: right; }
 
     </style>
 </head>
@@ -60,103 +66,161 @@
         <div class="progress-container" id="progressContainer">
             <div class="progress-bar" id="progressBar">0%</div>
         </div>
+        <div class="log-container" id="logContainer"></div>
+    </div>
 
-        <div class="log-container" id="logContainer">
+    <div class="card" id="resultsCard" style="display:none;">
+        <h3>Downloaded Tracks</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>YouTube Title</th>
+                    <th>Spotify Proposed</th>
+                    <th>Action</th>
+                </tr>
+            </thead>
+            <tbody id="resultsBody">
+            </tbody>
+        </table>
+    </div>
+
+    <div id="editModal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeModal()">&times;</span>
+            <h3>Select Correct Track</h3>
+            <div id="candidateList"></div>
         </div>
     </div>
 
     <script>
-        let eventSource = null; // Store reference to close it later
+        let eventSource = null;
+        let currentTrackUid = null;
 
         function startProcess() {
-            const urlInput = document.getElementById('url');
-            const startBtn = document.getElementById('startBtn');
-            const cancelBtn = document.getElementById('cancelBtn');
-            const logContainer = document.getElementById('logContainer');
-            const progressContainer = document.getElementById('progressContainer');
-            const progressBar = document.getElementById('progressBar');
+            const url = document.getElementById('url').value;
+            if (!url) return alert("Please enter a URL");
 
-            const url = urlInput.value;
-            if (!url) { alert("Please enter a URL"); return; }
+            document.getElementById('startBtn').disabled = true;
+            document.getElementById('cancelBtn').disabled = false;
+            document.getElementById('logContainer').innerHTML = "";
+            document.getElementById('progressBar').style.width = "0%";
+            document.getElementById('progressContainer').style.display = "block";
+            document.getElementById('resultsBody').innerHTML = ""; // Clear table on new run
+            document.getElementById('resultsCard').style.display = "block";
 
-            // UI Reset
-            startBtn.disabled = true;
-            cancelBtn.disabled = false; // Enable Cancel
-            startBtn.innerText = "Processing...";
-            
-            logContainer.innerHTML = "";
-            progressBar.style.width = "0%";
-            progressBar.innerText = "0%";
-            progressContainer.style.display = "block";
-
-            // Close any existing connection
             if (eventSource) eventSource.close();
-
-            // Open connection
             eventSource = new EventSource(`/stream?url=${encodeURIComponent(url)}`);
 
             eventSource.onmessage = function(event) {
                 const data = JSON.parse(event.data);
 
-                // 1. Update Progress
                 if (data.progress !== undefined) {
-                    progressBar.style.width = data.progress + "%";
-                    progressBar.innerText = data.progress + "%";
+                    document.getElementById('progressBar').style.width = data.progress + "%";
+                    document.getElementById('progressBar').innerText = data.progress + "%";
                 }
 
-                // 2. Logs
                 if (data.message) {
                     const div = document.createElement('div');
                     div.className = `log-entry status-${data.status}`;
                     div.innerText = data.message;
-                    logContainer.insertBefore(div, logContainer.firstChild);
+                    const lc = document.getElementById('logContainer');
+                    lc.insertBefore(div, lc.firstChild);
                 }
 
-                // 3. Handle End States (Finished, Error, or Cancelled)
+                // Add row to table on success
+                if (data.status === "success") {
+                    addResultRow(data);
+                }
+
                 if (["finished", "fatal_error", "cancelled"].includes(data.status)) {
                     stopEventStream();
                 }
             };
+            
+            eventSource.onerror = stopEventStream;
+        }
 
-            eventSource.onerror = function() {
-                const div = document.createElement('div');
-                div.className = "log-entry status-error";
-                div.innerText = "Connection lost or server error.";
-                logContainer.insertBefore(div, logContainer.firstChild);
-                stopEventStream();
-            };
+        function addResultRow(data) {
+            const tbody = document.getElementById('resultsBody');
+            const tr = document.createElement('tr');
+            tr.id = `row-${data.track_uid}`;
+            tr.innerHTML = `
+                <td>${data.youtube_title}</td>
+                <td class="spotify-title">${data.spotify_title}</td>
+                <td><button class="edit-btn" onclick="openEditModal('${data.track_uid}')">Edit</button></td>
+            `;
+            tbody.appendChild(tr);
+        }
+
+        function openEditModal(uid) {
+            currentTrackUid = uid;
+            const list = document.getElementById('candidateList');
+            list.innerHTML = "<p>Loading candidates...</p>";
+            document.getElementById('editModal').style.display = "block";
+
+            fetch(`/api/candidates/${uid}`)
+                .then(res => res.json())
+                .then(data => {
+                    list.innerHTML = "";
+                    if (!data.candidates || data.candidates.length === 0) {
+                        list.innerHTML = "<p>No other candidates found.</p>";
+                        return;
+                    }
+                    data.candidates.forEach(c => {
+                        const div = document.createElement('div');
+                        div.className = 'candidate-item';
+                        div.onclick = () => selectCandidate(c.id);
+                        div.innerHTML = `
+                            <img src="${c.image || ''}" class="candidate-img">
+                            <div class="candidate-info">
+                                <span class="candidate-title">${c.title}</span>
+                                <span class="candidate-artist">${c.artist}</span>
+                            </div>
+                            <span class="candidate-score">${(c.score * 100).toFixed(0)}%</span>
+                        `;
+                        list.appendChild(div);
+                    });
+                });
+        }
+
+        function selectCandidate(spotifyId) {
+            if(!confirm("Re-tag file with this song?")) return;
+            
+            fetch('/api/update_tag', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ track_uid: currentTrackUid, spotify_id: spotifyId })
+            })
+            .then(res => res.json())
+            .then(data => {
+                if(data.status === 'ok') {
+                    // Update table row
+                    const row = document.getElementById(`row-${currentTrackUid}`);
+                    row.querySelector('.spotify-title').innerText = `${data.result.spotify_artist} - ${data.result.spotify_title}`;
+                    closeModal();
+                    alert(`Updated! New filename: ${data.result.new_filename}`);
+                } else {
+                    alert("Error: " + data.message);
+                }
+            });
+        }
+
+        function closeModal() {
+            document.getElementById('editModal').style.display = "none";
+        }
+        
+        window.onclick = function(event) {
+            if (event.target == document.getElementById('editModal')) closeModal();
         }
 
         function cancelProcess() {
-            const cancelBtn = document.getElementById('cancelBtn');
-            cancelBtn.disabled = true; // Prevent double clicking
-            cancelBtn.innerText = "Cancelling...";
-
-            // Send signal to backend
-            fetch('/cancel', { method: 'POST' })
-                .then(response => response.json())
-                .then(data => {
-                    console.log("Cancel signal sent");
-                    // We don't close the stream here immediately. 
-                    // We wait for the backend to send the "cancelled" message via SSE 
-                    // to ensure cleanup is confirmed.
-                })
-                .catch(err => console.error("Error sending cancel signal:", err));
+            fetch('/cancel', { method: 'POST' });
         }
 
         function stopEventStream() {
-            if (eventSource) {
-                eventSource.close();
-                eventSource = null;
-            }
-            const startBtn = document.getElementById('startBtn');
-            const cancelBtn = document.getElementById('cancelBtn');
-            
-            startBtn.disabled = false;
-            startBtn.innerText = "Start Processing";
-            
-            cancelBtn.disabled = true;
-            cancelBtn.innerText = "Cancel";
+            if (eventSource) { eventSource.close(); eventSource = null; }
+            document.getElementById('startBtn').disabled = false;
+            document.getElementById('cancelBtn').disabled = true;
         }
     </script>
 

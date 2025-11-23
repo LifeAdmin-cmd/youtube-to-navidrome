@@ -95,10 +95,12 @@ class SpotifyClient:
             }
         }
 
-    def search_best_match(
+    def search_tracks(
         self, query: str, uploader: str = None, market: str = "DE"
-    ) -> Optional[Dict[str, Any]]:
-        """Searches Spotify and returns the metadata for the best match."""
+    ) -> Dict[str, Any]:
+        """
+        Searches Spotify and returns the best match metadata AND a list of all candidates.
+        """
 
         def word_match_ratio(text1: str, text2: str) -> float:
             words1 = set(re.findall(r"\w+", text1.lower()))
@@ -115,30 +117,53 @@ class SpotifyClient:
         resp = requests.get(self.SEARCH_API, headers=headers, params=params)
         tracks = resp.json().get("tracks", {}).get("items", [])
 
+        # Retry logic if strict search fails
         if not tracks and uploader:
             print("[Spotify] Retrying without uploader...")
             params["q"] = query
             resp = requests.get(self.SEARCH_API, headers=headers, params=params)
             tracks = resp.json().get("tracks", {}).get("items", [])
 
-        if not tracks:
-            return None
-
+        candidates = []
         best_track = None
         best_score = -1.0
 
         for track in tracks:
             t_name = track.get("name", "")
-            a_names = " ".join([a.get("name", "") for a in track.get("artists", [])])
-            full_str = f"{a_names} {t_name}"
+            artists = [a.get("name", "") for a in track.get("artists", [])]
+            a_names = ", ".join(artists)
 
+            # Calculate score
+            full_str = f"{' '.join(artists)} {t_name}"
             score = word_match_ratio(query, full_str)
+
+            # Get image
+            images = track.get("album", {}).get("images", [])
+            image_url = (
+                images[-1].get("url") if images else None
+            )  # Use smallest image for list
+
+            candidate = {
+                "id": track["id"],
+                "title": t_name,
+                "artist": a_names,
+                "album": track.get("album", {}).get("name"),
+                "image": image_url,
+                "score": score,
+            }
+            candidates.append(candidate)
+
             if score > best_score:
                 best_score = score
                 best_track = track
 
+        # Sort candidates by score
+        candidates.sort(key=lambda x: x["score"], reverse=True)
+
+        result = {"best_match": None, "candidates": candidates}
+
         if best_track:
             print(f"[Spotify] Match: '{best_track['name']}' (Score: {best_score:.2f})")
-            return self.get_track_metadata(best_track["id"])
+            result["best_match"] = self.get_track_metadata(best_track["id"])
 
-        return None
+        return result

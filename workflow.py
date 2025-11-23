@@ -3,6 +3,7 @@ import os
 import re
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Dict, Iterator
 
@@ -28,6 +29,9 @@ class WorkflowManager:
         self.downloader = Downloader(self.output_dir, self.cancel_event)
         self.processor = AudioProcessor()
 
+        # Store session data: { track_uid: { 'path': Path, 'candidates': [], 'youtube_title': str } }
+        self.tracks = {}
+
     def check_cancel(self):
         if self.cancel_event.is_set():
             raise OperationCancelled("Cancelled by user.")
@@ -35,7 +39,7 @@ class WorkflowManager:
     def cleanup(self):
         """Removes temporary files on cancellation."""
         print("[System] Cleaning up...")
-        time.sleep(1)  # Allow file locks to release
+        time.sleep(1)
 
         # 1. Clean yt-dlp temps
         for ext in ["*.part", "*.ytdl", "*.f*", "*.temp"]:
@@ -57,6 +61,32 @@ class WorkflowManager:
                     print(f"[Cleanup] Deleted: {f.name}")
                 except:
                     pass
+
+    def update_track_tags(self, track_uid: str, spotify_id: str) -> Dict:
+        """Retags an existing file with new Spotify metadata."""
+        if track_uid not in self.tracks:
+            raise ValueError("Track not found in history.")
+
+        track_data = self.tracks[track_uid]
+        current_path = track_data["path"]
+
+        if not current_path.exists():
+            raise FileNotFoundError(f"File {current_path} not found.")
+
+        # Fetch new metadata
+        new_meta = self.spotify.get_track_metadata(spotify_id)
+
+        # Retag
+        new_path = self.processor.tag_audio(current_path, new_meta["tags"])
+
+        # Update state
+        self.tracks[track_uid]["path"] = new_path
+
+        return {
+            "new_filename": new_path.name,
+            "spotify_title": new_meta["tags"]["Title"],
+            "spotify_artist": new_meta["tags"]["Artist"],
+        }
 
     def process_url(self, url: str) -> Iterator[str]:
         self.cancel_event.clear()
@@ -112,6 +142,8 @@ class WorkflowManager:
     def _process_video(
         self, url: str, pre_info: Dict, base_progress: int
     ) -> Iterator[str]:
+        track_uid = str(uuid.uuid4())
+
         try:
             if not pre_info.get("duration"):
                 with ytdlp.YoutubeDL({"quiet": True}) as ydl:
@@ -132,12 +164,18 @@ class WorkflowManager:
                 }
             )
 
-            # Spotify Match & Check
-            spotify_meta = None
+            # Spotify Search
+            spotify_result = None
+            candidates = []
+            tags = None
+
             try:
-                spotify_meta = self.spotify.search_best_match(title, uploader)
-                if spotify_meta:
-                    tags = spotify_meta["tags"]
+                search_res = self.spotify.search_tracks(title, uploader)
+                spotify_result = search_res["best_match"]
+                candidates = search_res["candidates"]
+
+                if spotify_result:
+                    tags = spotify_result["tags"]
                     if self.processor.check_duplicate(
                         self.output_dir, tags["Title"], tags.get("Album", "")
                     ):
@@ -189,7 +227,7 @@ class WorkflowManager:
                 final_file = raw_file
 
             # Tagging
-            if spotify_meta:
+            if spotify_result:
                 yield json.dumps(
                     {
                         "status": "processing",
@@ -197,12 +235,22 @@ class WorkflowManager:
                         "progress": base_progress,
                     }
                 )
-                final_file = self.processor.tag_audio(final_file, spotify_meta["tags"])
+                final_file = self.processor.tag_audio(final_file, tags)
+
+            # Save to session history
+            self.tracks[track_uid] = {
+                "path": final_file,
+                "youtube_title": title,
+                "candidates": candidates,
+            }
 
             yield json.dumps(
                 {
                     "status": "success",
                     "message": f"Saved: {final_file.name}",
+                    "track_uid": track_uid,
+                    "youtube_title": title,
+                    "spotify_title": tags["Title"] if tags else "No Match Found",
                     "progress": base_progress,
                 }
             )
