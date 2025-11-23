@@ -1,46 +1,42 @@
-import os
+import json
 
 from dotenv import load_dotenv
-from flask import Flask, flash, render_template, request
+from flask import Flask, Response, render_template, request, stream_with_context
 
-from youtube_music_dl import process_youtube_url
+from youtube_music_dl import process_input_url
 
-# 1. Load Environment Variables
 load_dotenv()
 
-# Check keys (same as your script)
-if not os.getenv("SPOTIFY_CLIENT_ID"):
-    print("Error: SPOTIFY_CLIENT_ID is missing from environment or .env file")
-
 app = Flask(__name__)
-app.secret_key = "super_secret_key_for_flash_messages"  # Required for showing messages
+# No secret_key needed for this approach as we aren't using Flash anymore
 
 
-@app.route("/", methods=["GET", "POST"])
+@app.route("/")
 def index():
-    if request.method == "POST":
-        # Get the URL from the form
-        youtube_url = request.form.get("url")
-
-        if not youtube_url:
-            flash("Please enter a URL.", "error")
-            return render_template("index.html")
-
-        try:
-            # 2. Process the URL
-            print(f"Processing: {youtube_url}")  # Shows in your terminal
-            process_youtube_url(youtube_url)
-
-            # Send success message to the website
-            flash(f"Successfully processed: {youtube_url}", "success")
-
-        except Exception as e:
-            # Send error message to the website
-            flash(f"Error processing URL: {str(e)}", "error")
-
     return render_template("index.html")
 
 
+@app.route("/stream")
+def stream():
+    # Get URL from the Javascript query parameters
+    youtube_url = request.args.get("url")
+
+    if not youtube_url:
+        return (
+            "data: "
+            + json.dumps({"status": "error", "message": "No URL provided"})
+            + "\n\n"
+        )
+
+    def generate():
+        # We loop through your generator function
+        for update_json in process_input_url(youtube_url):
+            # SSE format requires "data: <message>\n\n"
+            yield f"data: {update_json}\n\n"
+
+    # stream_with_context keeps the request active while the loop runs
+    return Response(stream_with_context(generate()), mimetype="text/event-stream")
+
+
 if __name__ == "__main__":
-    # debug=True allows the server to auto-reload if you change code
     app.run(debug=True, port=5000)

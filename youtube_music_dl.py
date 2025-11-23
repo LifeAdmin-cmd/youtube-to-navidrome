@@ -11,11 +11,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import requests
 import yt_dlp as ytdlp
-from dotenv import load_dotenv  # NEW IMPORT
+from dotenv import load_dotenv
 from mutagen.flac import Picture
 from mutagen.oggopus import OggOpus
 
@@ -374,11 +374,44 @@ def _best_match_in_album(
 
 
 def find_spotify_track_by_search(
-    query_str: str, artist: str = None, client_id=None, client_secret=None, market="DE"
+    query_str: str,
+    artist: str = None,
+    uploader: str = None,
+    client_id=None,
+    client_secret=None,
+    market="DE",
 ) -> Optional[Dict[str, Any]]:
     """
-    Refined search function. Can take a straight filename/title or an artist+title combo.
+    Refined search function.
+    Uses Title + Uploader (Channel) if available to improve accuracy.
+    Selects the best match from top 10 results based on string similarity.
     """
+
+    # --- 1. CLEANING LOGIC ---
+    # Helper function to safely strip brackets iteratively
+    def clean_brackets(text: str) -> str:
+        clean = text
+        # We loop until the string stops changing.
+        # This handles nested brackets like "(Title (Remix))" correctly.
+        while True:
+            prev = clean
+            # Remove (...) - strictly matching pairs
+            clean = re.sub(r"\s*\([^)]*\)", " ", clean)
+            # Remove [...] - strictly matching pairs
+            clean = re.sub(r"\s*\[[^]]*\]", " ", clean)
+            # Remove {...} - strictly matching pairs
+            clean = re.sub(r"\s*\{[^}]*\}", " ", clean)
+
+            # Collapse extra spaces
+            clean = " ".join(clean.split())
+
+            if clean == prev:
+                break
+        return clean
+
+    # Prepare base query
+    q = ""
+
     if artist:
         q = f'track:"{query_str}" artist:"{artist}"'
     else:
@@ -387,12 +420,31 @@ def find_spotify_track_by_search(
         if p_artist and p_title:
             q = f'track:"{p_title}" artist:"{p_artist}"'
         else:
-            # UPDATED: Clean up the query string (removes (), [], {}, <>)
-            q = re.sub(r"\s*[(\[\{<].*?[)\]\}>]\s*", " ", query_str).strip()
+            # --- APPLY NEW CLEANING HERE ---
+            clean_query = clean_brackets(query_str)
+
+            # Append YouTube Channel Name to query for better context
+            if uploader:
+                # Clean uploader name (remove generic terms like VEVO or Topic)
+                clean_uploader = re.sub(
+                    r"\s*(VEVO|Topic|Official|Music)\s*",
+                    "",
+                    uploader,
+                    flags=re.IGNORECASE,
+                ).strip()
+                if clean_uploader:
+                    clean_query = f"{clean_query} {clean_uploader}"
+
+            q = clean_query
 
     token = _get_spotify_access_token(client_id, client_secret)
     headers = {"Authorization": f"Bearer {token}"}
-    params = {"q": q, "type": "track", "limit": 5, "market": market}
+
+    q = f"{query_str} - {uploader}" if uploader else query_str
+    print(f"[Spotify Search] Querying Spotify with: {q}")
+
+    # Increased limit to 10 to widen the net
+    params = {"q": q, "type": "track", "limit": 10, "market": market}
 
     resp = requests.get(
         "https://api.spotify.com/v1/search", headers=headers, params=params
@@ -403,12 +455,12 @@ def find_spotify_track_by_search(
     tracks = resp.json().get("tracks", {}).get("items", [])
 
     # Fallback: if strict search failed, try looser search on just title
-    if not tracks and (artist or p_artist):
-        # e.g. remove artist from query
-        search_term = p_title if (not artist and p_artist) else query_str
-        # Ensure fallback also cleans brackets if it falls back to raw query
-        if not p_title:
-            search_term = re.sub(r"\s*[(\[\{<].*?[)\]\}>]\s*", " ", search_term).strip()
+    if not tracks:
+        search_term = (
+            p_title if (not artist and "p_title" in locals() and p_title) else query_str
+        )
+        # Apply the same iterative cleaning to the fallback search
+        search_term = clean_brackets(search_term)
 
         params["q"] = search_term
         resp = requests.get(
@@ -417,10 +469,49 @@ def find_spotify_track_by_search(
         if resp.status_code == 200:
             tracks = resp.json().get("tracks", {}).get("items", [])
 
+            for t in tracks:
+                print(
+                    f"[Spotify Fallback] Candidate: {t.get('name')} by {[a.get('name') for a in t.get('artists', [])]}"
+                )
+
     if not tracks:
         return None
 
-    top = tracks[0]
+    # --- SIMILARITY CHECK LOOP ---
+    print(f"[Spotify Search] Found {len(tracks)} candidates. Comparing similarity...")
+
+    best_track = None
+    best_score = -1.0
+
+    # Compare against the cleaned query (without the artist/uploader extras) for purity
+    target_text = _normalize_text(clean_brackets(query_str))
+
+    for track in tracks:
+        track_name = track.get("name", "")
+        artists = [a.get("name", "") for a in track.get("artists", [])]
+        artist_str = " ".join(artists)
+
+        # Compare: "Artist Title" vs Target
+        spotify_text_full = _normalize_text(f"{artist_str} {track_name}")
+        # Compare: "Title" vs Target
+        spotify_text_title = _normalize_text(track_name)
+
+        score_full = difflib.SequenceMatcher(
+            None, target_text, spotify_text_full
+        ).ratio()
+        score_title = difflib.SequenceMatcher(
+            None, target_text, spotify_text_title
+        ).ratio()
+
+        current_score = max(score_full, score_title)
+
+        if current_score > best_score:
+            best_score = current_score
+            best_track = track
+
+    top = best_track
+    print(f"[Spotify Search] Selected: '{top['name']}' (Score: {best_score:.2f})")
+    # ----------------------------------
 
     if top.get("type") == "album":
         chosen_id = _best_match_in_album(top.get("id"), query_str, token, market)
@@ -429,9 +520,11 @@ def find_spotify_track_by_search(
     return top
 
 
-def get_spotify_tags_from_search(query: str) -> Optional[Dict[str, Any]]:
-    print(f"--- Searching Spotify for: {query} ---")
-    track_or_id = find_spotify_track_by_search(query)
+def get_spotify_tags_from_search(
+    query: str, uploader: str = None
+) -> Optional[Dict[str, Any]]:
+    print(f"--- Searching Spotify for: {query} (Uploader: {uploader}) ---")
+    track_or_id = find_spotify_track_by_search(query, uploader=uploader)
 
     if not track_or_id:
         print(f"[Spotify Search] No match found for: {query}")
@@ -509,13 +602,9 @@ def check_if_song_exists(directory: Path, target_title: str, target_album: str) 
                 continue
 
             # Check Album Match (if target album is provided)
-            # If the spotify result has no album, we skip this check or rely solely on title
             if norm_album:
                 album_match = False
                 if not existing_albums:
-                    # If file has no album tag but title matches, it might be a duplicate,
-                    # but to be safe/strict we might want to say 'no match'.
-                    # Here we will assume if title matches exactly, it's a risk of duplicate.
                     pass
 
                 for a in existing_albums:
@@ -532,7 +621,6 @@ def check_if_song_exists(directory: Path, target_title: str, target_album: str) 
                 return True
 
         except Exception:
-            # File might be corrupted or not a valid opus file
             continue
 
     return False
@@ -615,83 +703,201 @@ def set_audio_tags(
 
 
 # ==========================================
-# PART 4: Coordinator Function
+# PART 4: Coordinator Function (Generator Version)
 # ==========================================
 
 
-def process_youtube_url(url: str):
+def _process_single_video(
+    video_url: str, pre_fetched_info: Optional[Dict] = None
+) -> Iterator[str]:
     """
-    Coordinates checking duplicates, downloading, cutting,
-    fetching Spotify metadata, and tagging/renaming.
+    Coordinates process for ONE video.
+    YIELDS JSON strings for the web UI.
     """
-    print(f"=== Starting Process for URL: {url} ===")
 
     # 1. Setup Output Directory from ENV
     env_dir = os.getenv("output_directory")
     if not env_dir:
-        print("WARNING: 'output_directory' not found in .env. Using current folder.")
         output_dir = Path(".")
     else:
         output_dir = Path(env_dir)
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # 2. Fetch Video Info (NO DOWNLOAD YET)
-    # We need the title to check Spotify before we spend time downloading
-    print("--- 0. Fetching Video Info (Pre-check) ---")
+    # 2. Fetch Video Info
     try:
-        with ytdlp.YoutubeDL({"quiet": True}) as ydl:
-            info = ydl.extract_info(url, download=False)
-            if isinstance(info, dict) and info.get("entries"):
-                info = info["entries"][0]
-            video_title = info["title"]
+        if pre_fetched_info:
+            info = pre_fetched_info
+        else:
+            yield json.dumps(
+                {"status": "processing", "message": "Fetching metadata..."}
+            )
+            with ytdlp.YoutubeDL({"quiet": True}) as ydl:
+                info = ydl.extract_info(video_url, download=False)
     except Exception as e:
-        print(f"FATAL: Could not fetch video info. {e}")
+        yield json.dumps(
+            {"status": "error", "message": f"Could not fetch info for {video_url}: {e}"}
+        )
         return
 
+    video_title = info.get("title")
+    video_uploader = info.get("uploader")
+    yield json.dumps(
+        {"status": "processing", "message": f"Found: {video_title} ({video_uploader})"}
+    )
+
     # 3. Search Metadata & Check Duplicates
-    # We try to find the spotify tags based on the YouTube title
     spotify_data = None
     try:
-        spotify_data = get_spotify_tags_from_search(video_title)
+        spotify_data = get_spotify_tags_from_search(
+            video_title, uploader=video_uploader
+        )
     except Exception as e:
         print(f"Metadata pre-search failed: {e}")
 
-    # If we found Spotify data, we can check if we already have this song
+    # Duplicate Check
     if spotify_data and "tags" in spotify_data:
         t_tags = spotify_data["tags"]
         s_title = t_tags.get("Title")
         s_album = t_tags.get("Album")
 
-        # CHECK IF EXISTS IN OUTPUT DIRECTORY
         if s_title and check_if_song_exists(output_dir, s_title, s_album or ""):
-            print(f"SKIP: Song '{s_title}' already exists in {output_dir}.")
+            yield json.dumps(
+                {
+                    "status": "skipped",
+                    "message": f"Skipped: '{s_title}' already exists.",
+                }
+            )
             return
     else:
-        print("No Spotify match found during pre-check. Proceeding to download.")
+        yield json.dumps(
+            {
+                "status": "processing",
+                "message": "No Spotify match found. downloading raw...",
+            }
+        )
 
     # 4. Download and Cut
     try:
-        # Pass info to avoid re-fetching
+        yield json.dumps(
+            {"status": "processing", "message": f"Downloading {video_title}..."}
+        )
         raw_file_path = download_and_cut(
-            url, out_dir=output_dir, audio_format="opus", video_info=info
+            video_url, out_dir=output_dir, audio_format="opus", video_info=info
         )
     except Exception as e:
-        print(f"FATAL: Download failed. {e}")
-        return
-
-    if not raw_file_path.exists():
-        print("FATAL: File not found after download.")
+        yield json.dumps(
+            {"status": "error", "message": f"Download failed for {video_title}: {e}"}
+        )
         return
 
     # 5. Tag and Rename
+    final_name = raw_file_path.name
     if spotify_data and "tags" in spotify_data:
-        print(
-            f"Found Match: {spotify_data['tags'].get('Artist')} - {spotify_data['tags'].get('Title')}"
-        )
-        print("\n--- 6. Applying Tags and Renaming ---")
+        yield json.dumps({"status": "processing", "message": "Tagging file..."})
         final_path = set_audio_tags(raw_file_path, spotify_data["tags"], overwrite=True)
-        print(f"DONE. Final file: {final_path}")
+        final_name = final_path.name
+        yield json.dumps(
+            {
+                "status": "success",
+                "message": f"Successfully processed: {final_name}",
+            }
+        )
     else:
-        print("No Spotify match found. Keeping original filename.")
-        print(f"DONE. Final file: {raw_file_path}")
+        yield json.dumps(
+            {
+                "status": "success",
+                "message": f"Downloaded (No Tags): {final_name}",
+            }
+        )
+
+
+def process_input_url(url: str) -> Iterator[str]:
+    """
+    Main Generator Entrypoint.
+    Yields JSON updates for the UI.
+    """
+
+    # Send initial finding message
+    yield json.dumps(
+        {"status": "processing", "message": "Analyzing URL...", "progress": 0}
+    )
+
+    ydl_opts = {
+        "extract_flat": True,
+        "quiet": True,
+        "ignoreerrors": True,
+    }
+
+    entries = []
+    is_playlist = False
+
+    try:
+        with ytdlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+
+        if "entries" in info:
+            is_playlist = True
+            entries = list(info["entries"])
+            yield json.dumps(
+                {
+                    "status": "processing",
+                    "message": f"Playlist detected: {len(entries)} items.",
+                    "progress": 0,
+                }
+            )
+        else:
+            entries = [info]
+
+    except Exception as e:
+        yield json.dumps(
+            {"status": "fatal_error", "message": f"Failed to parse URL: {e}"}
+        )
+        return
+
+    total_count = len(entries)
+
+    # Loop through all videos
+    for index, entry in enumerate(entries):
+        if not entry:
+            continue
+
+        # Calculate current progress percentage
+        current_percent = int((index / total_count) * 100)
+
+        # Get URL
+        video_url = entry.get("url")
+        if not video_url and entry.get("id"):
+            video_url = f"https://www.youtube.com/watch?v={entry.get('id')}"
+
+        if not video_url:
+            continue
+
+        # Determine if we have full info (single video) or need to fetch (playlist)
+        # For single video, 'entry' is the full info. For playlist, it's flat info.
+        pre_info = entry if not is_playlist else None
+
+        # Run the single video processor and yield its messages
+        # We catch the yields from _process_single_video and re-yield them with progress attached
+        for update_json in _process_single_video(video_url, pre_fetched_info=pre_info):
+            data = json.loads(update_json)
+            # Inject global progress
+            data["progress"] = current_percent
+            yield json.dumps(data)
+
+    # Final success message
+    yield json.dumps(
+        {"status": "finished", "message": "All operations completed!", "progress": 100}
+    )
+
+
+# ==========================================
+# CLI Entry Point (Still works for testing)
+# ==========================================
+if __name__ == "__main__":
+    # If running manually, we just consume the generator and print messages
+    target_url = input("Enter YouTube URL (Video or Playlist): ").strip()
+    if target_url:
+        for update in process_input_url(target_url):
+            data = json.loads(update)
+            print(f"[{data.get('status').upper()}] {data.get('message')}")
