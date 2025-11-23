@@ -10,12 +10,15 @@ from flask import (
     stream_with_context,
 )
 
-# Import the cancel function along with the processor
-from youtube_music_dl import process_input_url, trigger_cancellation
+# Import the Class from your new workflow file
+from workflow import WorkflowManager
 
 load_dotenv()
 
 app = Flask(__name__)
+
+# Initialize the manager globally so both routes access the same instance
+manager = WorkflowManager()
 
 
 @app.route("/")
@@ -35,18 +38,24 @@ def stream():
         )
 
     def generate():
-        # The generator now yields "cancelled" status if interrupted
-        for update_json in process_input_url(youtube_url):
+        # manager.process_url yields JSON strings directly
+        # We wrap them in the SSE "data: ... \n\n" format
+        for update_json in manager.process_url(youtube_url):
             yield f"data: {update_json}\n\n"
 
     return Response(stream_with_context(generate()), mimetype="text/event-stream")
 
 
-# --- NEW ROUTE ---
 @app.route("/cancel", methods=["POST"])
 def cancel():
     """Endpoint to trigger the cancellation event."""
-    trigger_cancellation()
+    # We set the event flag inside the global manager instance
+    manager.cancel_event.set()
+
+    # Optional: You can explicitly call cleanup here,
+    # though the workflow usually handles it when it catches the event.
+    # manager.cleanup()
+
     return jsonify({"status": "ok", "message": "Cancellation signal sent."})
 
 
