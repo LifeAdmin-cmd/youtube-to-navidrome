@@ -27,6 +27,7 @@
         .log-container { max-height: 200px; overflow-y: auto; border-top: 1px solid #eee; margin-top: 15px; font-size: 14px; }
         .log-entry { padding: 5px; border-bottom: 1px solid #f9f9f9; }
         .status-success { color: #155724; background-color: #d4edda; }
+        .status-skipped { color: #856404; background-color: #fff3cd; }
         .status-error { color: #721c24; background-color: #f8d7da; }
 
         /* Table Styles */
@@ -35,6 +36,7 @@
         th { background-color: #f8f9fa; font-weight: 600; }
         .edit-btn { background-color: #007bff; padding: 6px 12px; font-size: 14px; width: auto; }
         .edit-btn:hover { background-color: #0056b3; }
+        .row-skipped { background-color: #fffcf0; color: #856404; }
 
         /* Modal Styles */
         .modal { display: none; position: fixed; z-index: 1; left: 0; top: 0; width: 100%; height: 100%; overflow: auto; background-color: rgba(0,0,0,0.5); }
@@ -70,12 +72,13 @@
     </div>
 
     <div class="card" id="resultsCard" style="display:none;">
-        <h3>Downloaded Tracks</h3>
+        <h3>Downloaded / Processed Tracks</h3>
         <table>
             <thead>
                 <tr>
                     <th>YouTube Title</th>
                     <th>Spotify Proposed</th>
+                    <th>Status</th>
                     <th>Action</th>
                 </tr>
             </thead>
@@ -86,7 +89,7 @@
 
     <div id="editModal" class="modal">
         <div class="modal-content">
-            <span class="close" onclick="closeModal()">&times;</span>
+            <span class="close" onclick="closeModal()">×</span>
             <h3>Select Correct Track</h3>
             <div id="candidateList"></div>
         </div>
@@ -105,7 +108,7 @@
             document.getElementById('logContainer').innerHTML = "";
             document.getElementById('progressBar').style.width = "0%";
             document.getElementById('progressContainer').style.display = "block";
-            document.getElementById('resultsBody').innerHTML = ""; // Clear table on new run
+            document.getElementById('resultsBody').innerHTML = "";
             document.getElementById('resultsCard').style.display = "block";
 
             if (eventSource) eventSource.close();
@@ -127,8 +130,8 @@
                     lc.insertBefore(div, lc.firstChild);
                 }
 
-                // Add row to table on success
-                if (data.status === "success") {
+                // Add row to table for both success AND skipped items
+                if (data.status === "success" || data.status === "skipped") {
                     addResultRow(data);
                 }
 
@@ -144,9 +147,18 @@
             const tbody = document.getElementById('resultsBody');
             const tr = document.createElement('tr');
             tr.id = `row-${data.track_uid}`;
+            
+            if(data.status === 'skipped') {
+                tr.className = 'row-skipped';
+            }
+
+            const statusLabel = data.status === 'skipped' ? 'Skipped' : 'Saved';
+            const spotifyText = data.spotify_title ? `${data.spotify_artist} - ${data.spotify_title}` : 'No Match';
+
             tr.innerHTML = `
                 <td>${data.youtube_title}</td>
-                <td class="spotify-title">${data.spotify_title}</td>
+                <td class="spotify-title">${spotifyText}</td>
+                <td class="status-cell">${statusLabel}</td>
                 <td><button class="edit-btn" onclick="openEditModal('${data.track_uid}')">Edit</button></td>
             `;
             tbody.appendChild(tr);
@@ -184,8 +196,12 @@
         }
 
         function selectCandidate(spotifyId) {
-            if(!confirm("Re-tag file with this song?")) return;
+            if(!confirm("Process file with this metadata? This may trigger a re-download.")) return;
             
+            // Indicate processing
+            const list = document.getElementById('candidateList');
+            list.innerHTML = "<p>Processing... Please wait.</p>";
+
             fetch('/api/update_tag', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -194,14 +210,25 @@
             .then(res => res.json())
             .then(data => {
                 if(data.status === 'ok') {
-                    // Update table row
                     const row = document.getElementById(`row-${currentTrackUid}`);
+                    
+                    // Update Text
                     row.querySelector('.spotify-title').innerText = `${data.result.spotify_artist} - ${data.result.spotify_title}`;
+                    row.querySelector('.status-cell').innerText = "Saved";
+                    
+                    // Remove skipped styling if present
+                    row.classList.remove('row-skipped');
+                    
                     closeModal();
-                    alert(`Updated! New filename: ${data.result.new_filename}`);
+                    alert(`Success! Saved as: ${data.result.new_filename}`);
                 } else {
                     alert("Error: " + data.message);
+                    closeModal();
                 }
+            })
+            .catch(err => {
+                alert("Request failed: " + err);
+                closeModal();
             });
         }
 
