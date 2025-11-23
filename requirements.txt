@@ -4,3 +4,5 @@ requests
 mutagen
 python-dotenv
 flask
+llama-cpp-python
+huggingface_hub

@@ -10,6 +10,7 @@ from typing import Dict, Iterator
 import yt_dlp as ytdlp
 
 from services.downloader import Downloader
+from services.extractor import MetadataExtractor
 from services.processor import AudioProcessor
 from services.sponsorblock import SponsorBlockClient
 from services.spotify import SpotifyClient
@@ -28,6 +29,7 @@ class WorkflowManager:
         self.sponsorblock = SponsorBlockClient()
         self.downloader = Downloader(self.output_dir, self.cancel_event)
         self.processor = AudioProcessor()
+        self.extractor = MetadataExtractor()
 
         # Store session data: { track_uid: { 'path': Path, 'candidates': [], 'youtube_title': str, 'video_info': dict, 'status': str } }
         self.tracks = {}
@@ -214,13 +216,19 @@ class WorkflowManager:
                 }
             )
 
+            # --- NEW: Extract Metadata using LLM ---
+            # (Assume self.extractor is initialized in __init__)
+            cleaned_meta = self.extractor.extract_metadata(title, uploader)
+            search_query = cleaned_meta["title"]
+            search_artist = cleaned_meta["artist"]
+
             # 2. Spotify Search
             spotify_result = None
             candidates = []
             tags = None
 
             try:
-                search_res = self.spotify.search_tracks(title, uploader)
+                search_res = self.spotify.search_tracks(search_query, uploader=search_artist)                
                 spotify_result = search_res["best_match"]
                 candidates = search_res["candidates"]
 
