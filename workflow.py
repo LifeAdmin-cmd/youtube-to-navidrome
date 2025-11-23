@@ -99,6 +99,15 @@ class WorkflowManager:
         new_meta = self.spotify.get_track_metadata(spotify_id)
         tags = new_meta["tags"]
 
+        # --- FIX: Check for duplicates before applying changes ---
+        if self.processor.check_duplicate(
+            tags["Title"], tags["Artist"], tags.get("Album", "")
+        ):
+            raise ValueError(
+                f"Track '{tags['Title']} - {tags['Artist']}' already exists in the database."
+            )
+        # ---------------------------------------------------------
+
         # Check if file exists or needs downloading (e.g. if it was skipped)
         if track_data.get("path") and track_data["path"].exists():
             current_path = track_data["path"]
