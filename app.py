@@ -52,11 +52,22 @@ def cancel():
 
 @app.route("/api/candidates/<track_uid>", methods=["GET"])
 def get_candidates(track_uid):
-    """Returns the list of Spotify candidates for a specific download."""
+    """Returns the list of Spotify candidates for a specific download, plus track info for the modal."""
     track = manager.tracks.get(track_uid)
     if not track:
         return jsonify({"error": "Track not found"}), 404
-    return jsonify({"candidates": track["candidates"]})
+
+    youtube_title = track["youtube_title"]
+    uploader = track["video_info"].get("uploader")
+    original_query = f"{youtube_title} - {uploader}" if uploader else youtube_title
+
+    return jsonify(
+        {
+            "candidates": track["candidates"],
+            "youtube_title": youtube_title,
+            "original_query": original_query,
+        }
+    )
 
 
 @app.route("/api/update_tag", methods=["POST"])
@@ -88,6 +99,24 @@ def delete_track():
     try:
         manager.delete_track(track_uid)
         return jsonify({"status": "ok", "message": "File deleted."})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/api/rerun_search/<track_uid>", methods=["POST"])
+def rerun_search(track_uid):
+    """Performs a new Spotify search for the track using a custom or original query."""
+    data = request.json
+    custom_query = data.get("query")
+
+    if not track_uid:
+        return jsonify({"error": "Missing track_uid"}), 400
+
+    try:
+        # custom_query can be None or "" which the workflow method handles
+        result = manager.rerun_spotify_search(track_uid, custom_query)
+        # result contains 'candidates' and 'query_used'
+        return jsonify({"status": "ok", "result": result})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 

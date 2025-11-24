@@ -94,6 +94,43 @@ class WorkflowManager:
 
         return final_file
 
+    def rerun_spotify_search(self, track_uid: str, custom_query: str = None) -> Dict:
+        """Performs a new Spotify search, updates the candidates list, and returns results."""
+        if track_uid not in self.tracks:
+            raise ValueError("Track not found.")
+
+        track = self.tracks[track_uid]
+
+        # Treat empty string as None
+        if custom_query == "":
+            custom_query = None
+
+        if custom_query:
+            # If custom query provided, search with just the query, no uploader
+            search_title = custom_query
+            search_uploader = None
+        else:
+            # If no custom query, use original YouTube title and uploader
+            search_title = track["youtube_title"]
+            search_uploader = track["video_info"].get("uploader")
+
+        print(
+            f"[Rerun Search] Searching for: {search_title} (Uploader: {search_uploader})"
+        )
+
+        # Perform the search
+        search_res = self.spotify.search_tracks(search_title, search_uploader)
+
+        # Update the candidates list in the track data (important for get_candidates endpoint and for UI consistency)
+        track["candidates"] = search_res["candidates"]
+
+        # The frontend will want to display the search string that was used.
+        query_display = (
+            f"{search_title} - {search_uploader}" if search_uploader else search_title
+        )
+
+        return {"query_used": query_display, "candidates": search_res["candidates"]}
+
     def update_track_tags(self, track_uid: str, spotify_id: str) -> Dict:
         """Retags an existing file or processes a skipped file with new metadata."""
         if track_uid not in self.tracks:

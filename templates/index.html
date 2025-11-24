@@ -53,8 +53,8 @@
         .candidate-artist { font-size: 14px; color: #666; }
         .candidate-score { font-size: 12px; color: #1db954; float: right; }
         
-        .modal-footer { margin-top: 20px; padding-top: 10px; border-top: 1px solid #eee; text-align: right; }
-        .delete-btn { background-color: #dc3545; width: auto; padding: 8px 16px; margin-right: 10px; }
+        .modal-footer { margin-top: 20px; padding-top: 10px; border-top: 1px solid #eee; text-align: right; display: flex; justify-content: flex-end; gap: 10px; }
+        .delete-btn { background-color: #dc3545; width: auto; padding: 8px 16px; }
         .delete-btn:hover { background-color: #c82333; }
 
     </style>
@@ -100,10 +100,37 @@
             <h3>Select Correct Track</h3>
             <div id="candidateList"></div>
             <div class="modal-footer">
+                <button class="edit-btn" onclick="openRerunSearchModal()">Rerun Tagging</button>
                 <button class="delete-btn" onclick="deleteTrackFromModal()">Delete File</button>
             </div>
         </div>
     </div>
+    
+    <div id="rerunSearchModal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeRerunSearchModal()">×</span>
+            <h3>Rerun Spotify Search</h3>
+            <p>Track: <span id="rerunTrackTitle" style="font-weight: bold;"></span></p>
+            <p>Enter a custom search query or leave blank to use the original query: 
+               <span id="originalQueryHint" style="font-style: italic; color: #666;"></span>
+            </p>
+            
+            <input type="text" id="rerunQueryInput" placeholder="e.g. Artist - Title">
+            <button class="edit-btn" id="rerunSearchBtn" onclick="submitRerunSearch()" style="width: 150px;">Search</button>
+            
+            <hr style="margin: 20px 0;">
+            
+            <h4 id="rerunCandidateHeader">Search Results</h4>
+            <div id="rerunCandidateList">
+                <p>Click 'Search' to get new results.</p>
+            </div>
+            
+            <div class="modal-footer">
+                <button class="delete-btn" onclick="closeRerunSearchModal()" style="background-color: #6c757d; width: 100px;">Close</button>
+            </div>
+        </div>
+    </div>
+
 
     <script>
         let eventSource = null;
@@ -183,43 +210,122 @@
             tbody.appendChild(tr);
         }
 
+        function displayCandidates(listElementId, candidates) {
+            const list = document.getElementById(listElementId);
+            list.innerHTML = "";
+            if (!candidates || candidates.length === 0) {
+                list.innerHTML = "<p>No candidates found.</p>";
+                return;
+            }
+            candidates.forEach(c => {
+                const div = document.createElement('div');
+                div.className = 'candidate-item';
+                div.onclick = () => selectCandidate(c.id);
+                div.innerHTML = `
+                    <img src="${c.image || ''}" class="candidate-img">
+                    <div class="candidate-info">
+                        <span class="candidate-title">${c.title}</span>
+                        <span class="candidate-artist">${c.artist}</span>
+                    </div>
+                    <span class="candidate-score">${(c.score * 100).toFixed(0)}%</span>
+                `;
+                list.appendChild(div);
+            });
+        }
+
         function openEditModal(uid) {
             currentTrackUid = uid;
-            const list = document.getElementById('candidateList');
-            list.innerHTML = "<p>Loading candidates...</p>";
+            document.getElementById('candidateList').innerHTML = "<p>Loading candidates...</p>";
             document.getElementById('editModal').style.display = "block";
 
             fetch(`/api/candidates/${uid}`)
                 .then(res => res.json())
                 .then(data => {
-                    list.innerHTML = "";
-                    if (!data.candidates || data.candidates.length === 0) {
-                        list.innerHTML = "<p>No other candidates found.</p>";
-                        return;
-                    }
-                    data.candidates.forEach(c => {
-                        const div = document.createElement('div');
-                        div.className = 'candidate-item';
-                        div.onclick = () => selectCandidate(c.id);
-                        div.innerHTML = `
-                            <img src="${c.image || ''}" class="candidate-img">
-                            <div class="candidate-info">
-                                <span class="candidate-title">${c.title}</span>
-                                <span class="candidate-artist">${c.artist}</span>
-                            </div>
-                            <span class="candidate-score">${(c.score * 100).toFixed(0)}%</span>
-                        `;
-                        list.appendChild(div);
-                    });
+                    displayCandidates('candidateList', data.candidates);
                 });
+        }
+        
+        function openRerunSearchModal() {
+            // Close the main edit modal
+            document.getElementById('editModal').style.display = "none";
+            
+            const trackTitleSpan = document.getElementById('rerunTrackTitle');
+            const queryHintSpan = document.getElementById('originalQueryHint');
+            const rerunInput = document.getElementById('rerunQueryInput');
+            
+            // Clear results and enable button
+            document.getElementById('rerunCandidateList').innerHTML = "<p>Click 'Search' to get new results.</p>";
+            document.getElementById('rerunCandidateHeader').innerText = "Search Results";
+            document.getElementById('rerunSearchBtn').disabled = false;
+
+            // Fetch info for the modal
+            fetch(`/api/candidates/${currentTrackUid}`)
+                .then(res => res.json())
+                .then(data => {
+                    trackTitleSpan.innerText = data.youtube_title;
+                    queryHintSpan.innerText = data.original_query;
+                    
+                    // Pre-fill the input with the original query and select it for easy overwriting
+                    rerunInput.value = data.original_query;
+                    rerunInput.select(); 
+
+                    document.getElementById('rerunSearchModal').style.display = "block";
+                })
+                .catch(err => {
+                    alert("Failed to load track info for rerun: " + err);
+                    closeRerunSearchModal();
+                });
+        }
+        
+        function submitRerunSearch() {
+            const query = document.getElementById('rerunQueryInput').value;
+            const uid = currentTrackUid;
+
+            if (!uid) return;
+            
+            document.getElementById('rerunSearchBtn').disabled = true;
+            document.getElementById('rerunCandidateList').innerHTML = "<p>Searching Spotify...</p>";
+
+            fetch(`/api/rerun_search/${uid}`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ query: query })
+            })
+            .then(res => res.json())
+            .then(data => {
+                document.getElementById('rerunSearchBtn').disabled = false;
+                
+                if(data.status === 'ok') {
+                    const result = data.result;
+                    document.getElementById('rerunCandidateHeader').innerText = `Search Results (Query: ${result.query_used})`;
+                    displayCandidates('rerunCandidateList', result.candidates);
+
+                } else {
+                    document.getElementById('rerunCandidateList').innerHTML = `<p>Error: ${data.message}</p>`;
+                }
+            })
+            .catch(err => {
+                document.getElementById('rerunSearchBtn').disabled = false;
+                document.getElementById('rerunCandidateList').innerHTML = `<p>Request failed: ${err}</p>`;
+            });
+        }
+
+        function closeModal() {
+            document.getElementById('editModal').style.display = "none";
+            document.getElementById('rerunSearchModal').style.display = "none";
+        }
+        
+        function closeRerunSearchModal() {
+            document.getElementById('rerunSearchModal').style.display = "none";
         }
 
         function selectCandidate(spotifyId) {
             if(!confirm("Process file with this metadata? This may trigger a re-download.")) return;
             
-            // Indicate processing
-            const list = document.getElementById('candidateList');
-            list.innerHTML = "<p>Processing... Please wait.</p>";
+            // Indicate processing in both modals in case user is in rerun modal
+            document.getElementById('candidateList').innerHTML = "<p>Processing... Please wait.</p>";
+            document.getElementById('rerunCandidateList').innerHTML = "<p>Processing... Please wait.</p>";
+
 
             fetch('/api/update_tag', {
                 method: 'POST',
@@ -231,7 +337,7 @@
                 if(data.status === 'ok') {
                     const row = document.getElementById(`row-${currentTrackUid}`);
                     
-                    // Update Text
+                    // Update main table row text and status
                     row.querySelector('.spotify-title').innerText = `${data.result.spotify_artist} - ${data.result.spotify_title}`;
                     row.querySelector('.status-cell').innerText = "Saved";
                     
@@ -279,12 +385,11 @@
             });
         }
 
-        function closeModal() {
-            document.getElementById('editModal').style.display = "none";
-        }
         
         window.onclick = function(event) {
-            if (event.target == document.getElementById('editModal')) closeModal();
+            const editModal = document.getElementById('editModal');
+            const rerunModal = document.getElementById('rerunSearchModal');
+            if (event.target == editModal || event.target == rerunModal) closeModal();
         }
 
         function cancelProcess() {
