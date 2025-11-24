@@ -146,6 +146,9 @@ class WorkflowManager:
         if track_uid not in self.tracks:
             raise ValueError("Track not found.")
 
+        # FIX: Clear the cancellation flag for this independent operation
+        self.cancel_event.clear()
+
         track = self.tracks[track_uid]
 
         # Treat empty string as None
@@ -177,6 +180,9 @@ class WorkflowManager:
         """Retags an existing file or processes a skipped file with new metadata."""
         if track_uid not in self.tracks:
             raise ValueError("Track not found in history.")
+
+        # FIX: Clear the cancellation flag for this independent operation
+        self.cancel_event.clear()
 
         track_data = self.tracks[track_uid]
 
