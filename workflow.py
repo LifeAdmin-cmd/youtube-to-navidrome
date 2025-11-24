@@ -22,6 +22,7 @@ class WorkflowManager:
         env_dir = output_dir or os.getenv("output_directory")
         self.output_dir = Path(env_dir) if env_dir else Path(".")
         self.cancel_event = threading.Event()
+        self.MAX_SEARCH_ATTEMPTS = 3  # Max retries for initial Spotify search
 
         self.spotify = SpotifyClient()
         self.sponsorblock = SponsorBlockClient()
@@ -105,29 +106,22 @@ class WorkflowManager:
         if custom_query == "":
             custom_query = None
 
+        search_title = track["youtube_title"]
+
+        # Determine the query string to use for the API call
         if custom_query:
-            # If custom query provided, search with just the query, no uploader
-            search_title = custom_query
-            search_uploader = None
+            query_to_use = custom_query
+            query_display = custom_query
         else:
-            # If no custom query, use original YouTube title and uploader
-            search_title = track["youtube_title"]
-            search_uploader = track["video_info"].get("uploader")
+            uploader = track["video_info"].get("uploader")
+            query_to_use = f"{search_title} - {uploader}" if uploader else search_title
+            query_display = query_to_use
 
-        print(
-            f"[Rerun Search] Searching for: {search_title} (Uploader: {search_uploader})"
-        )
-
-        # Perform the search
-        search_res = self.spotify.search_tracks(search_title, search_uploader)
+        # Perform the search using the raw search method, scored against the original video title.
+        search_res = self.spotify.search_raw(query_to_use, original_title=search_title)
 
         # Update the candidates list in the track data (important for get_candidates endpoint and for UI consistency)
         track["candidates"] = search_res["candidates"]
-
-        # The frontend will want to display the search string that was used.
-        query_display = (
-            f"{search_title} - {search_uploader}" if search_uploader else search_title
-        )
 
         return {"query_used": query_display, "candidates": search_res["candidates"]}
 
@@ -251,36 +245,58 @@ class WorkflowManager:
                 }
             )
 
-            # 2. Spotify Search
+            # 2. Spotify Search (With Retries up to MAX_SEARCH_ATTEMPTS)
             spotify_result = None
             candidates = []
             tags = None
+            last_error = None
 
-            try:
-                search_res = self.spotify.search_tracks(title, uploader)
-                spotify_result = search_res["best_match"]
-                candidates = search_res["candidates"]
-                self.tracks[track_uid]["candidates"] = candidates
-            except Exception as e:
-                # Log API error and re-raise or handle gracefully
-                # We yield the error here so the user sees it
-                yield json.dumps(
-                    {
-                        "status": "error",
-                        "message": f"Spotify API Error for '{title}': {str(e)}",
-                        "progress": base_progress,
-                    }
-                )
-                # If Search fails completely, we treat it as no tags found
-                spotify_result = None
+            for attempt in range(1, self.MAX_SEARCH_ATTEMPTS + 1):
+                try:
+                    search_res = self.spotify.search_tracks(
+                        title, uploader, attempt=attempt
+                    )  # Pass attempt number
+
+                    # If any match is found, break the retry loop
+                    if search_res["best_match"]:
+                        spotify_result = search_res["best_match"]
+                        candidates = search_res["candidates"]
+                        print(f"[Spotify] Found match on attempt {attempt}.")
+                        break
+
+                    # Keep the candidates list updated with results from the last search
+                    candidates = search_res["candidates"]
+
+                except Exception as e:
+                    # Log API error and store it for final failure message
+                    last_error = (
+                        f"Spotify API Error (Attempt {attempt}) for '{title}': {str(e)}"
+                    )
+                    yield json.dumps(
+                        {
+                            "status": "warning",
+                            "message": last_error,
+                            "progress": base_progress,
+                        }
+                    )
+
+            # Save candidates from the last attempt (even if no match found)
+            self.tracks[track_uid]["candidates"] = candidates
 
             # --- Check if tags were found ---
             if not spotify_result:
                 self.tracks[track_uid]["status"] = "error"
+
+                # Report the last technical error or a generic failure message
+                if last_error:
+                    error_message = last_error
+                else:
+                    error_message = f"No tags found for '{title}' after {self.MAX_SEARCH_ATTEMPTS} attempts. File not saved."
+
                 yield json.dumps(
                     {
                         "status": "error",
-                        "message": f"No tags found for '{title}'. File not saved.",
+                        "message": error_message,
                         "progress": base_progress,
                         "track_uid": track_uid,
                         "youtube_title": title,

@@ -1,7 +1,7 @@
 import base64
 import os
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import requests
 
@@ -48,7 +48,9 @@ class SpotifyClient:
         headers = self._get_headers()
 
         # 1. Track Info
-        resp = requests.get(f"{self.BASE_API}/tracks/{track_id}", headers=headers)
+        resp = requests.get(
+            f"{self.BASE_API}/tracks/{track_id}", headers=headers, timeout=10
+        )
         resp.raise_for_status()
         track = resp.json()
 
@@ -57,7 +59,9 @@ class SpotifyClient:
         if album_info.get("id"):
             try:
                 a_resp = requests.get(
-                    f"{self.BASE_API}/albums/{album_info['id']}", headers=headers
+                    f"{self.BASE_API}/albums/{album_info['id']}",
+                    headers=headers,
+                    timeout=10,
                 )
                 if a_resp.ok:
                     album_info = a_resp.json()
@@ -70,7 +74,9 @@ class SpotifyClient:
         if artists:
             try:
                 ar_resp = requests.get(
-                    f"{self.BASE_API}/artists/{artists[0]['id']}", headers=headers
+                    f"{self.BASE_API}/artists/{artists[0]['id']}",
+                    headers=headers,
+                    timeout=10,
                 )
                 if ar_resp.ok:
                     genres = ar_resp.json().get("genres", [])
@@ -95,34 +101,18 @@ class SpotifyClient:
             }
         }
 
-    def search_tracks(
-        self, query: str, uploader: str = None, market: str = "DE"
+    def _word_match_ratio(self, text1: str, text2: str) -> float:
+        """Helper for scoring tracks."""
+        words1 = set(re.findall(r"\w+", text1.lower()))
+        words2 = set(re.findall(r"\w+", text2.lower()))
+        intersection = words1.intersection(words2)
+        total = len(words1) + len(words2)
+        return (2.0 * len(intersection)) / total if total > 0 else 0.0
+
+    def _score_candidates(
+        self, tracks: List[Dict[str, Any]], target_title: str
     ) -> Dict[str, Any]:
-        """
-        Searches Spotify and returns the best match metadata AND a list of all candidates.
-        """
-
-        def word_match_ratio(text1: str, text2: str) -> float:
-            words1 = set(re.findall(r"\w+", text1.lower()))
-            words2 = set(re.findall(r"\w+", text2.lower()))
-            intersection = words1.intersection(words2)
-            total = len(words1) + len(words2)
-            return (2.0 * len(intersection)) / total if total > 0 else 0.0
-
-        headers = self._get_headers()
-        q_str = f"{query} - {uploader}" if uploader else query
-        params = {"q": q_str, "type": "track", "limit": 10, "market": market}
-
-        print(f"[Spotify] Searching: {q_str}")
-        resp = requests.get(self.SEARCH_API, headers=headers, params=params)
-        tracks = resp.json().get("tracks", {}).get("items", [])
-
-        # Retry logic if strict search fails
-        if not tracks and uploader:
-            print("[Spotify] Retrying without uploader...")
-            params["q"] = query
-            resp = requests.get(self.SEARCH_API, headers=headers, params=params)
-            tracks = resp.json().get("tracks", {}).get("items", [])
+        """Helper to score tracks and find the best match/candidates list."""
 
         candidates = []
         best_track = None
@@ -133,15 +123,13 @@ class SpotifyClient:
             artists = [a.get("name", "") for a in track.get("artists", [])]
             a_names = ", ".join(artists)
 
-            # Calculate score
+            # Calculate score using the *target* title (YouTube title in most cases)
             full_str = f"{' '.join(artists)} {t_name}"
-            score = word_match_ratio(query, full_str)
+            score = self._word_match_ratio(target_title, full_str)
 
             # Get image
             images = track.get("album", {}).get("images", [])
-            image_url = (
-                images[-1].get("url") if images else None
-            )  # Use smallest image for list
+            image_url = images[-1].get("url") if images else None
 
             candidate = {
                 "id": track["id"],
@@ -167,3 +155,61 @@ class SpotifyClient:
             result["best_match"] = self.get_track_metadata(best_track["id"])
 
         return result
+
+    def _execute_search(self, query_string: str, market: str) -> List[Dict[str, Any]]:
+        """Executes the Spotify API search and returns raw tracks."""
+        headers = self._get_headers()
+        params = {"q": query_string, "type": "track", "limit": 10, "market": market}
+
+        resp = requests.get(self.SEARCH_API, headers=headers, params=params, timeout=10)
+        resp.raise_for_status()
+        return resp.json().get("tracks", {}).get("items", [])
+
+    def search_tracks(
+        self, title: str, uploader: str = None, market: str = "DE", attempt: int = 1
+    ) -> Dict[str, Any]:
+        """
+        Searches Spotify using one of three pre-defined strategies based on 'attempt'.
+        The scoring is always done against the original YouTube video title.
+        """
+
+        # --- Search Strategy Logic ---
+        q_str = ""
+
+        if attempt == 1:
+            # Strategy 1: Strict match with uploader
+            q_str = f"{title} - {uploader}" if uploader else title
+            print(f"[Spotify] Attempt 1 Search (Title+Uploader): {q_str}")
+        elif attempt == 2:
+            # Strategy 2: Relaxed match (title only)
+            q_str = title
+            print(f"[Spotify] Attempt 2 Search (Title Only): {q_str}")
+        elif attempt == 3:
+            # Strategy 3: Looser match (title with common artifact removal)
+            # Use regex to remove common tags/artifacts (e.g. [Official Video])
+            loose_title = re.sub(r"\[.*?\]|\(.*?\)|\{.*?\}", "", title).strip()
+            q_str = loose_title or title
+            print(f"[Spotify] Attempt 3 Search (Loose Title): {q_str}")
+        else:
+            return {"best_match": None, "candidates": []}
+
+        try:
+            tracks = self._execute_search(q_str, market)
+        except requests.exceptions.RequestException as e:
+            # Re-raise to be handled by the workflow's retry mechanism
+            raise e
+
+        return self._score_candidates(tracks, title)
+
+    def search_raw(
+        self, query_string: str, original_title: str, market: str = "DE"
+    ) -> Dict[str, Any]:
+        """Used for manual search; takes a user query string and scores against original_title."""
+
+        print(f"[Spotify] Manual Search: {query_string}")
+        try:
+            tracks = self._execute_search(query_string, market)
+        except requests.exceptions.RequestException as e:
+            raise e
+
+        return self._score_candidates(tracks, original_title)
