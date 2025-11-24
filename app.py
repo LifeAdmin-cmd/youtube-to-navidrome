@@ -76,5 +76,21 @@ def update_tag():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+@app.route("/api/delete_track", methods=["POST"])
+def delete_track():
+    """Deletes the downloaded file associated with the track_uid."""
+    data = request.json
+    track_uid = data.get("track_uid")
+
+    if not track_uid:
+        return jsonify({"error": "Missing track_uid"}), 400
+
+    try:
+        manager.delete_track(track_uid)
+        return jsonify({"status": "ok", "message": "File deleted."})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 if __name__ == "__main__":
     app.run(debug=True, port=5000)

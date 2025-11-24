@@ -36,7 +36,10 @@
         th { background-color: #f8f9fa; font-weight: 600; }
         .edit-btn { background-color: #007bff; padding: 6px 12px; font-size: 14px; width: auto; }
         .edit-btn:hover { background-color: #0056b3; }
+        
         .row-skipped { background-color: #fffcf0; color: #856404; }
+        /* Error row style (Red background) */
+        .row-error { background-color: #ffe6e6; color: #a00; }
 
         /* Modal Styles */
         .modal { display: none; position: fixed; z-index: 1; left: 0; top: 0; width: 100%; height: 100%; overflow: auto; background-color: rgba(0,0,0,0.5); }
@@ -49,6 +52,10 @@
         .candidate-title { font-weight: bold; display: block; }
         .candidate-artist { font-size: 14px; color: #666; }
         .candidate-score { font-size: 12px; color: #1db954; float: right; }
+        
+        .modal-footer { margin-top: 20px; padding-top: 10px; border-top: 1px solid #eee; text-align: right; }
+        .delete-btn { background-color: #dc3545; width: auto; padding: 8px 16px; margin-right: 10px; }
+        .delete-btn:hover { background-color: #c82333; }
 
     </style>
 </head>
@@ -92,6 +99,9 @@
             <span class="close" onclick="closeModal()">×</span>
             <h3>Select Correct Track</h3>
             <div id="candidateList"></div>
+            <div class="modal-footer">
+                <button class="delete-btn" onclick="deleteTrackFromModal()">Delete File</button>
+            </div>
         </div>
     </div>
 
@@ -130,9 +140,12 @@
                     lc.insertBefore(div, lc.firstChild);
                 }
 
-                // Add row to table for both success AND skipped items
-                if (data.status === "success" || data.status === "skipped") {
-                    addResultRow(data);
+                // Add row to table for success, skipped, OR error
+                if (["success", "skipped", "error"].includes(data.status)) {
+                    // Only add if we have track_uid (which error/skipped/success messages should have)
+                    if (data.track_uid) {
+                        addResultRow(data);
+                    }
                 }
 
                 if (["finished", "fatal_error", "cancelled"].includes(data.status)) {
@@ -145,18 +158,24 @@
 
         function addResultRow(data) {
             const tbody = document.getElementById('resultsBody');
+            
+            // Avoid duplicates if multiple messages sent for same ID
+            if(document.getElementById(`row-${data.track_uid}`)) return;
+
             const tr = document.createElement('tr');
             tr.id = `row-${data.track_uid}`;
             
             if(data.status === 'skipped') {
                 tr.className = 'row-skipped';
+            } else if (data.status === 'error') {
+                tr.className = 'row-error';
             }
 
-            const statusLabel = data.status === 'skipped' ? 'Skipped' : 'Saved';
+            const statusLabel = data.status.charAt(0).toUpperCase() + data.status.slice(1);
             const spotifyText = data.spotify_title ? `${data.spotify_artist} - ${data.spotify_title}` : 'No Match';
 
             tr.innerHTML = `
-                <td>${data.youtube_title}</td>
+                <td>${data.youtube_title || 'Unknown'}</td>
                 <td class="spotify-title">${spotifyText}</td>
                 <td class="status-cell">${statusLabel}</td>
                 <td><button class="edit-btn" onclick="openEditModal('${data.track_uid}')">Edit</button></td>
@@ -216,8 +235,9 @@
                     row.querySelector('.spotify-title').innerText = `${data.result.spotify_artist} - ${data.result.spotify_title}`;
                     row.querySelector('.status-cell').innerText = "Saved";
                     
-                    // Remove skipped styling if present
+                    // Remove skipped/error styling if present
                     row.classList.remove('row-skipped');
+                    row.classList.remove('row-error');
                     
                     closeModal();
                     alert(`Success! Saved as: ${data.result.new_filename}`);
@@ -229,6 +249,33 @@
             .catch(err => {
                 alert("Request failed: " + err);
                 closeModal();
+            });
+        }
+        
+        function deleteTrackFromModal() {
+            if (!currentTrackUid) return;
+            if (!confirm("Are you sure you want to delete this file? This cannot be undone.")) return;
+
+            fetch('/api/delete_track', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ track_uid: currentTrackUid })
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.status === 'ok') {
+                    // Remove the row from the table
+                    const row = document.getElementById(`row-${currentTrackUid}`);
+                    if (row) row.remove();
+                    
+                    closeModal();
+                    alert("File deleted successfully.");
+                } else {
+                    alert("Error deleting file: " + data.message);
+                }
+            })
+            .catch(err => {
+                alert("Delete request failed: " + err);
             });
         }
 

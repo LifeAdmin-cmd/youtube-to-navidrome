@@ -14,28 +14,26 @@ class SponsorBlockClient:
     ) -> List[Tuple[float, float]]:
         params = {"videoID": video_id, "categories": json.dumps(categories)}
 
-        try:
-            resp = requests.get(self.BASE_URL, params=params, timeout=10)
-            if resp.status_code == 404:
-                print("[SponsorBlock] No segments found.")
-                return []
-            resp.raise_for_status()
+        # Removed try/except block to allow errors to propagate to the workflow logger
+        resp = requests.get(self.BASE_URL, params=params, timeout=10)
 
-            data = resp.json()
-            segments = []
-            for segment in data:
-                start, end = segment["segment"]
-                print(
-                    f"[SponsorBlock] Found segment: {start}s - {end}s ({segment['category']})"
-                )
-                segments.append((float(start), float(end)))
-
-            segments.sort(key=lambda x: x[0])
-            return segments
-
-        except Exception as e:
-            print(f"[SponsorBlock] Warning: {e}")
+        if resp.status_code == 404:
+            print("[SponsorBlock] No segments found.")
             return []
+
+        resp.raise_for_status()
+
+        data = resp.json()
+        segments = []
+        for segment in data:
+            start, end = segment["segment"]
+            print(
+                f"[SponsorBlock] Found segment: {start}s - {end}s ({segment['category']})"
+            )
+            segments.append((float(start), float(end)))
+
+        segments.sort(key=lambda x: x[0])
+        return segments
 
     @staticmethod
     def invert_segments(

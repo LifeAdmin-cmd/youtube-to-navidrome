@@ -1,6 +1,5 @@
 import json
 import os
-import re
 import threading
 import time
 import uuid
@@ -29,7 +28,7 @@ class WorkflowManager:
         self.downloader = Downloader(self.output_dir, self.cancel_event)
         self.processor = AudioProcessor()
 
-        # Store session data: { track_uid: { 'path': Path, 'candidates': [], 'youtube_title': str, 'video_info': dict, 'status': str } }
+        # Store session data
         self.tracks = {}
 
     def check_cancel(self):
@@ -40,7 +39,6 @@ class WorkflowManager:
         """Removes temporary files on cancellation."""
         print("[System] Cleaning up...")
         time.sleep(1)
-
         for ext in ["*.part", "*.ytdl", "*.f*", "*.temp"]:
             for f in self.output_dir.glob(ext):
                 try:
@@ -48,26 +46,34 @@ class WorkflowManager:
                 except:
                     pass
 
-        for f in self.output_dir.glob("*.opus"):
-            if (
-                re.search(r"\[[a-zA-Z0-9_-]{11}\]", f.name)
-                or "_cut" in f.name
-                or len(f.stem) == 11
-            ):
-                try:
-                    f.unlink()
-                    print(f"[Cleanup] Deleted: {f.name}")
-                except:
-                    pass
+    def delete_track(self, track_uid: str):
+        """Deletes a track from disk and session."""
+        if track_uid not in self.tracks:
+            raise ValueError("Track not found.")
+
+        track = self.tracks[track_uid]
+        path = track.get("path")
+
+        if path and path.exists():
+            try:
+                path.unlink()
+            except Exception as e:
+                raise IOError(f"Failed to delete file: {e}")
+
+        # Mark as deleted in session or remove
+        del self.tracks[track_uid]
+        return True
 
     def _download_and_process(self, url: str, info: Dict) -> Path:
-        """Helper to download, sponsorblock, and cut a video. Returns path to untagged file."""
+        """Helper to download, sponsorblock, and cut a video."""
         # 1. Download
         raw_file = self.downloader.download_video(url, info)
 
         # 2. SponsorBlock
         vid_id = info["id"]
         duration = info["duration"]
+
+        # Now allows exceptions to bubble up to be caught by _process_video
         bad_segments = self.sponsorblock.get_segments(
             vid_id, ["music_offtopic", "intro", "outro", "selfpromo", "interaction"]
         )
@@ -99,28 +105,23 @@ class WorkflowManager:
         new_meta = self.spotify.get_track_metadata(spotify_id)
         tags = new_meta["tags"]
 
-        # --- FIX: Check for duplicates before applying changes ---
         if self.processor.check_duplicate(
             tags["Title"], tags["Artist"], tags.get("Album", "")
         ):
             raise ValueError(
                 f"Track '{tags['Title']} - {tags['Artist']}' already exists in the database."
             )
-        # ---------------------------------------------------------
 
-        # Check if file exists or needs downloading (e.g. if it was skipped)
         if track_data.get("path") and track_data["path"].exists():
             current_path = track_data["path"]
             new_path = self.processor.tag_audio(current_path, tags)
         else:
-            # It was skipped or missing, so we must download it now
             print(f"[Update] Downloading skipped track: {track_data['youtube_title']}")
             untagged_file = self._download_and_process(
                 track_data["url"], track_data["video_info"]
             )
             new_path = self.processor.tag_audio(untagged_file, tags)
 
-        # Update state
         self.tracks[track_uid]["path"] = new_path
         self.tracks[track_uid]["status"] = "success"
 
@@ -196,7 +197,6 @@ class WorkflowManager:
             title = info.get("title")
             uploader = info.get("uploader")
 
-            # 1. Initialize Session Data
             self.tracks[track_uid] = {
                 "video_info": info,
                 "url": url,
@@ -223,30 +223,56 @@ class WorkflowManager:
                 search_res = self.spotify.search_tracks(title, uploader)
                 spotify_result = search_res["best_match"]
                 candidates = search_res["candidates"]
-
                 self.tracks[track_uid]["candidates"] = candidates
-
-                if spotify_result:
-                    tags = spotify_result["tags"]
-                    # 3. Duplicate Check
-                    if self.processor.check_duplicate(
-                        tags["Title"], tags["Artist"], tags.get("Album", "")
-                    ):
-                        self.tracks[track_uid]["status"] = "skipped"
-                        yield json.dumps(
-                            {
-                                "status": "skipped",
-                                "message": f"Skipped: {tags['Title']} exists.",
-                                "progress": base_progress,
-                                "track_uid": track_uid,
-                                "youtube_title": title,
-                                "spotify_title": tags["Title"],
-                                "spotify_artist": tags["Artist"],
-                            }
-                        )
-                        return
             except Exception as e:
-                print(f"Metadata error: {e}")
+                # Log API error and re-raise or handle gracefully
+                # We yield the error here so the user sees it
+                yield json.dumps(
+                    {
+                        "status": "error",
+                        "message": f"Spotify API Error for '{title}': {str(e)}",
+                        "progress": base_progress,
+                    }
+                )
+                # If Search fails completely, we treat it as no tags found
+                spotify_result = None
+
+            # --- Check if tags were found ---
+            if not spotify_result:
+                self.tracks[track_uid]["status"] = "error"
+                yield json.dumps(
+                    {
+                        "status": "error",
+                        "message": f"No tags found for '{title}'. File not saved.",
+                        "progress": base_progress,
+                        "track_uid": track_uid,
+                        "youtube_title": title,
+                        "spotify_title": None,
+                        "spotify_artist": None,
+                    }
+                )
+                return  # Stop processing this file
+            # --------------------------------
+
+            tags = spotify_result["tags"]
+
+            # 3. Duplicate Check
+            if self.processor.check_duplicate(
+                tags["Title"], tags["Artist"], tags.get("Album", "")
+            ):
+                self.tracks[track_uid]["status"] = "skipped"
+                yield json.dumps(
+                    {
+                        "status": "skipped",
+                        "message": f"Skipped: {tags['Title']} exists.",
+                        "progress": base_progress,
+                        "track_uid": track_uid,
+                        "youtube_title": title,
+                        "spotify_title": tags["Title"],
+                        "spotify_artist": tags["Artist"],
+                    }
+                )
+                return
 
             # 4. Download & Process
             yield json.dumps(
@@ -257,23 +283,18 @@ class WorkflowManager:
                 }
             )
 
-            # Use helper to avoid code duplication with update_track_tags
-            # We explicitly handle the steps here visually for the user if we wanted,
-            # but calling the helper is cleaner.
             final_file = self._download_and_process(url, info)
 
             # 5. Tagging
-            if spotify_result:
-                yield json.dumps(
-                    {
-                        "status": "processing",
-                        "message": "Applying tags...",
-                        "progress": base_progress,
-                    }
-                )
-                final_file = self.processor.tag_audio(final_file, tags)
+            yield json.dumps(
+                {
+                    "status": "processing",
+                    "message": "Applying tags...",
+                    "progress": base_progress,
+                }
+            )
+            final_file = self.processor.tag_audio(final_file, tags)
 
-            # Update Session
             self.tracks[track_uid]["path"] = final_file
             self.tracks[track_uid]["status"] = "success"
 
@@ -283,8 +304,8 @@ class WorkflowManager:
                     "message": f"Saved: {final_file.name}",
                     "track_uid": track_uid,
                     "youtube_title": title,
-                    "spotify_title": tags["Title"] if tags else "No Match Found",
-                    "spotify_artist": tags["Artist"] if tags else "",
+                    "spotify_title": tags["Title"],
+                    "spotify_artist": tags["Artist"],
                     "progress": base_progress,
                 }
             )
@@ -292,10 +313,16 @@ class WorkflowManager:
         except Exception as e:
             if isinstance(e, OperationCancelled):
                 raise e
+
+            # Log the specific error to UI
             yield json.dumps(
                 {
                     "status": "error",
-                    "message": f"Error processing {url}: {e}",
+                    "message": f"Error processing {url}: {str(e)}",
                     "progress": base_progress,
+                    "track_uid": track_uid,
+                    "youtube_title": title if "title" in locals() else "Unknown",
+                    "spotify_title": None,
+                    "spotify_artist": None,
                 }
             )
