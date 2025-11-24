@@ -4,7 +4,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Dict, Iterator
+from typing import Any, Dict, Iterator
 
 import yt_dlp as ytdlp
 
@@ -22,15 +22,60 @@ class WorkflowManager:
         env_dir = output_dir or os.getenv("output_directory")
         self.output_dir = Path(env_dir) if env_dir else Path(".")
         self.cancel_event = threading.Event()
-        self.MAX_SEARCH_ATTEMPTS = 3  # Max retries for initial Spotify search
+        self.MAX_SEARCH_ATTEMPTS = 3
+
+        # Ensure output directory exists before attempting to load state
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.tracks = self._load_state()
 
         self.spotify = SpotifyClient()
         self.sponsorblock = SponsorBlockClient()
         self.downloader = Downloader(self.output_dir, self.cancel_event)
         self.processor = AudioProcessor()
 
-        # Store session data
-        self.tracks = {}
+    def _get_state_path(self) -> Path:
+        return self.output_dir / "workflow_state.json"
+
+    def _save_state(self):
+        """Saves the current state of self.tracks to a JSON file."""
+        state_path = self._get_state_path()
+
+        # Prepare data for saving (Path objects must be converted to strings)
+        serializable_tracks = {}
+        for uid, track in self.tracks.items():
+            serializable_track = track.copy()
+            # Path object conversion
+            if serializable_track.get("path"):
+                serializable_track["path"] = str(serializable_track["path"])
+            serializable_tracks[uid] = serializable_track
+
+        try:
+            with state_path.open("w") as f:
+                json.dump(serializable_tracks, f, indent=4)
+        except Exception as e:
+            print(f"[System] Warning: Failed to save state: {e}")
+
+    def _load_state(self) -> Dict[str, Any]:
+        """Loads the previous state of self.tracks from a JSON file."""
+        state_path = self._get_state_path()
+        if not state_path.exists():
+            return {}
+
+        try:
+            with state_path.open("r") as f:
+                loaded_tracks = json.load(f)
+
+            # Convert string paths back to Path objects
+            for track in loaded_tracks.values():
+                if track.get("path") and isinstance(track["path"], str):
+                    track["path"] = Path(track["path"])
+
+            return loaded_tracks
+        except Exception as e:
+            print(
+                f"[System] Failed to load state from {state_path}: {e}. Starting fresh."
+            )
+            return {}
 
     def check_cancel(self):
         if self.cancel_event.is_set():
@@ -63,6 +108,7 @@ class WorkflowManager:
 
         # Mark as deleted in session or remove
         del self.tracks[track_uid]
+        self._save_state()
         return True
 
     def _download_and_process(self, url: str, info: Dict) -> Path:
@@ -120,8 +166,10 @@ class WorkflowManager:
         # Perform the search using the raw search method, scored against the original video title.
         search_res = self.spotify.search_raw(query_to_use, original_title=search_title)
 
-        # Update the candidates list in the track data (important for get_candidates endpoint and for UI consistency)
+        # Update the candidates list in the track data
         track["candidates"] = search_res["candidates"]
+
+        self._save_state()
 
         return {"query_used": query_display, "candidates": search_res["candidates"]}
 
@@ -143,11 +191,13 @@ class WorkflowManager:
                 f"Track '{tags['Title']} - {tags['Artist']}' already exists in the database."
             )
 
+        # Re-download and process if the file was deleted/never saved (error/skipped status originally)
         if track_data.get("path") and track_data["path"].exists():
             current_path = track_data["path"]
             new_path = self.processor.tag_audio(current_path, tags)
         else:
             print(f"[Update] Downloading skipped track: {track_data['youtube_title']}")
+            # Must ensure download & cut runs even if it was previously skipped/error
             untagged_file = self._download_and_process(
                 track_data["url"], track_data["video_info"]
             )
@@ -155,6 +205,9 @@ class WorkflowManager:
 
         self.tracks[track_uid]["path"] = new_path
         self.tracks[track_uid]["status"] = "success"
+        self.tracks[track_uid]["best_match_tags"] = tags  # Update successful tags
+
+        self._save_state()  # Save successful status
 
         return {
             "new_filename": new_path.name,
@@ -211,12 +264,14 @@ class WorkflowManager:
             self.cleanup()
             yield json.dumps({"status": "cancelled", "message": "Operation cancelled."})
         except Exception as e:
+            # Fatal error during playlist extraction/pre-check
             yield json.dumps({"status": "fatal_error", "message": str(e)})
 
     def _process_video(
         self, url: str, pre_info: Dict, base_progress: int
     ) -> Iterator[str]:
         track_uid = str(uuid.uuid4())
+        title = "Unknown"
 
         try:
             if not pre_info.get("duration"):
@@ -235,7 +290,9 @@ class WorkflowManager:
                 "youtube_title": title,
                 "path": None,
                 "status": "pending",
+                "best_match_tags": None,
             }
+            self._save_state()  # Save initial record
 
             yield json.dumps(
                 {
@@ -255,20 +312,17 @@ class WorkflowManager:
                 try:
                     search_res = self.spotify.search_tracks(
                         title, uploader, attempt=attempt
-                    )  # Pass attempt number
+                    )
 
-                    # If any match is found, break the retry loop
                     if search_res["best_match"]:
                         spotify_result = search_res["best_match"]
+                        tags = spotify_result["tags"]
                         candidates = search_res["candidates"]
-                        print(f"[Spotify] Found match on attempt {attempt}.")
                         break
 
-                    # Keep the candidates list updated with results from the last search
                     candidates = search_res["candidates"]
 
                 except Exception as e:
-                    # Log API error and store it for final failure message
                     last_error = (
                         f"Spotify API Error (Attempt {attempt}) for '{title}': {str(e)}"
                     )
@@ -280,18 +334,19 @@ class WorkflowManager:
                         }
                     )
 
-            # Save candidates from the last attempt (even if no match found)
             self.tracks[track_uid]["candidates"] = candidates
+            self.tracks[track_uid]["best_match_tags"] = tags
 
             # --- Check if tags were found ---
             if not spotify_result:
                 self.tracks[track_uid]["status"] = "error"
 
-                # Report the last technical error or a generic failure message
                 if last_error:
                     error_message = last_error
                 else:
                     error_message = f"No tags found for '{title}' after {self.MAX_SEARCH_ATTEMPTS} attempts. File not saved."
+
+                self._save_state()
 
                 yield json.dumps(
                     {
@@ -304,16 +359,16 @@ class WorkflowManager:
                         "spotify_artist": None,
                     }
                 )
-                return  # Stop processing this file
-            # --------------------------------
+                return
 
-            tags = spotify_result["tags"]
+            # tags is already set above
 
             # 3. Duplicate Check
             if self.processor.check_duplicate(
                 tags["Title"], tags["Artist"], tags.get("Album", "")
             ):
                 self.tracks[track_uid]["status"] = "skipped"
+                self._save_state()
                 yield json.dumps(
                     {
                         "status": "skipped",
@@ -350,6 +405,7 @@ class WorkflowManager:
 
             self.tracks[track_uid]["path"] = final_file
             self.tracks[track_uid]["status"] = "success"
+            self._save_state()
 
             yield json.dumps(
                 {
@@ -367,14 +423,17 @@ class WorkflowManager:
             if isinstance(e, OperationCancelled):
                 raise e
 
-            # Log the specific error to UI
+            # Log the specific error to UI and save state with error
+            self.tracks[track_uid]["status"] = "error"
+            self._save_state()
+
             yield json.dumps(
                 {
                     "status": "error",
                     "message": f"Error processing {url}: {str(e)}",
                     "progress": base_progress,
                     "track_uid": track_uid,
-                    "youtube_title": title if "title" in locals() else "Unknown",
+                    "youtube_title": title,
                     "spotify_title": None,
                     "spotify_artist": None,
                 }

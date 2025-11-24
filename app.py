@@ -113,12 +113,36 @@ def rerun_search(track_uid):
         return jsonify({"error": "Missing track_uid"}), 400
 
     try:
-        # custom_query can be None or "" which the workflow method handles
         result = manager.rerun_spotify_search(track_uid, custom_query)
-        # result contains 'candidates' and 'query_used'
         return jsonify({"status": "ok", "result": result})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/api/failed_tracks", methods=["GET"])
+def get_failed_tracks():
+    """Returns a list of tracks that failed or were skipped, for display on page load."""
+    failed_tracks = []
+
+    for uid, track in manager.tracks.items():
+        # if track["status"] in ["error", "skipped"]:
+        if track["status"] in ["error"]:
+
+            tags = track.get("best_match_tags") or {}
+
+            # The structure needed matches the stream event data
+            failed_tracks.append(
+                {
+                    "track_uid": uid,
+                    "youtube_title": track["youtube_title"],
+                    # Use saved best match tags (present on skipped, None on error)
+                    "spotify_title": tags.get("Title"),
+                    "spotify_artist": tags.get("Artist"),
+                    "status": track["status"],
+                }
+            )
+
+    return jsonify({"tracks": failed_tracks})
 
 
 if __name__ == "__main__":

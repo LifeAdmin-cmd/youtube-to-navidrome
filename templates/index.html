@@ -100,7 +100,7 @@
             <h3>Select Correct Track</h3>
             <div id="candidateList"></div>
             <div class="modal-footer">
-                <button class="edit-btn" onclick="openRerunSearchModal()">Rerun Tagging</button>
+                <button class="edit-btn" onclick="openRerunSearchModal()">Manual Tagging</button>
                 <button class="delete-btn" onclick="deleteTrackFromModal()">Delete File</button>
             </div>
         </div>
@@ -136,16 +136,40 @@
         let eventSource = null;
         let currentTrackUid = null;
 
+        // NEW: Load failed tracks on page load
+        document.addEventListener('DOMContentLoaded', loadFailedTracks);
+        
+        function loadFailedTracks() {
+            fetch('/api/failed_tracks')
+                .then(res => res.json())
+                .then(data => {
+                    const tracks = data.tracks;
+                    if (tracks.length > 0) {
+                        document.getElementById('resultsCard').style.display = "block";
+                        
+                        // Add a log message
+                        const div = document.createElement('div');
+                        div.className = `log-entry status-skipped`; // Use skipped styling as neutral warning
+                        div.innerText = `Loaded ${tracks.length} previously failed tracks.`;
+                        document.getElementById('logContainer').insertBefore(div, document.getElementById('logContainer').firstChild);
+
+                        tracks.forEach(track => {
+                            addResultRow(track);
+                        });
+                    }
+                })
+                .catch(err => console.error("Failed to load failed tracks:", err));
+        }
+
         function startProcess() {
             const url = document.getElementById('url').value;
             if (!url) return alert("Please enter a URL");
 
             document.getElementById('startBtn').disabled = true;
             document.getElementById('cancelBtn').disabled = false;
-            document.getElementById('logContainer').innerHTML = "";
+            // Note: logContainer and resultsBody are NOT cleared here to preserve failed songs from the previous session
             document.getElementById('progressBar').style.width = "0%";
             document.getElementById('progressContainer').style.display = "block";
-            document.getElementById('resultsBody').innerHTML = "";
             document.getElementById('resultsCard').style.display = "block";
 
             if (eventSource) eventSource.close();
@@ -171,7 +195,16 @@
                 if (["success", "skipped", "error"].includes(data.status)) {
                     // Only add if we have track_uid (which error/skipped/success messages should have)
                     if (data.track_uid) {
-                        addResultRow(data);
+                        // Only add success rows if they don't exist (i.e., immediately after process), 
+                        // as they will be removed on next reload by loadFailedTracks() logic.
+                        if (data.status !== "success" || !document.getElementById(`row-${data.track_uid}`)) {
+                            addResultRow(data);
+                        }
+                        
+                        // NEW: If a track goes from error/skipped (already in table) to success, remove it from the live table
+                        if (data.status === "success" && document.getElementById(`row-${data.track_uid}`)) {
+                            document.getElementById(`row-${data.track_uid}`).remove();
+                        }
                     }
                 }
 
@@ -324,7 +357,8 @@
             
             // Indicate processing in both modals in case user is in rerun modal
             document.getElementById('candidateList').innerHTML = "<p>Processing... Please wait.</p>";
-            document.getElementById('rerunCandidateList').innerHTML = "<p>Processing... Please wait.</p>";
+            const rerunList = document.getElementById('rerunCandidateList');
+            if (rerunList) rerunList.innerHTML = "<p>Processing... Please wait.</p>";
 
 
             fetch('/api/update_tag', {
@@ -337,13 +371,8 @@
                 if(data.status === 'ok') {
                     const row = document.getElementById(`row-${currentTrackUid}`);
                     
-                    // Update main table row text and status
-                    row.querySelector('.spotify-title').innerText = `${data.result.spotify_artist} - ${data.result.spotify_title}`;
-                    row.querySelector('.status-cell').innerText = "Saved";
-                    
-                    // Remove skipped/error styling if present
-                    row.classList.remove('row-skipped');
-                    row.classList.remove('row-error');
+                    // Remove the row from the table when a failed/skipped track is successfully re-tagged
+                    if (row) row.remove();
                     
                     closeModal();
                     alert(`Success! Saved as: ${data.result.new_filename}`);
@@ -387,9 +416,8 @@
 
         
         window.onclick = function(event) {
-            const editModal = document.getElementById('editModal');
-            const rerunModal = document.getElementById('rerunSearchModal');
-            if (event.target == editModal || event.target == rerunModal) closeModal();
+            if (event.target == document.getElementById('editModal')) closeModal();
+            if (event.target == document.getElementById('rerunSearchModal')) closeRerunSearchModal();
         }
 
         function cancelProcess() {
