@@ -93,6 +93,7 @@ class SpotifyClient:
                 "Album Cover Art": cover_art,
                 "Album": album_info.get("name"),
                 "Artist": ", ".join(artist_names),
+                "Artists": artist_names,  # <--- NEW: Pass the list of artists
                 "Title": track.get("name"),
                 "Genre": genres[0] if genres else None,
                 "Label": album_info.get("label"),

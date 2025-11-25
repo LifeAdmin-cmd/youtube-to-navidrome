@@ -77,6 +77,14 @@ class AudioProcessor:
                 if tags.get(k):
                     audio[v] = str(tags[k])
 
+            # Set 'ARTISTS' tag if there is more than one artist
+            if (
+                tags.get("Artists")
+                and isinstance(tags["Artists"], list)
+                and len(tags["Artists"]) > 1
+            ):
+                audio["ARTISTS"] = tags["Artists"]
+
             # Cover Art
             cover_url = tags.get("Album Cover Art")
             if cover_url:
