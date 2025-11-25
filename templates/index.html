@@ -228,16 +228,14 @@
                 if (["success", "skipped", "error"].includes(data.status)) {
                     // Only add if we have track_uid (which error/skipped/success messages should have)
                     if (data.track_uid) {
-                        // Only add success rows if they don't exist (i.e., immediately after process), 
-                        // as they will be removed on next reload by loadFailedTracks() logic.
-                        if (data.status !== "success" || !document.getElementById(`row-${data.track_uid}`)) {
-                            addResultRow(data);
+                        // If the row already exists (e.g. it was an error and now retrying to success), 
+                        // remove it first so we can re-add the updated version
+                        const existingRow = document.getElementById(`row-${data.track_uid}`);
+                        if (existingRow) {
+                            existingRow.remove();
                         }
                         
-                        // NEW: If a track goes from error/skipped (already in table) to success, remove it from the live table
-                        if (data.status === "success" && document.getElementById(`row-${data.track_uid}`)) {
-                            document.getElementById(`row-${data.track_uid}`).remove();
-                        }
+                        addResultRow(data);
                     }
                 }
 
@@ -404,8 +402,12 @@
                 if(data.status === 'ok') {
                     const row = document.getElementById(`row-${currentTrackUid}`);
                     
-                    // Remove the row from the table when a failed/skipped track is successfully re-tagged
-                    if (row) row.remove();
+                    // Update row to show success instead of removing it
+                    if (row) {
+                        row.className = ""; // Remove skipped/error classes
+                        row.querySelector('.spotify-title').innerText = `${data.result.spotify_artist} - ${data.result.spotify_title}`;
+                        row.querySelector('.status-cell').innerText = "Success";
+                    }
                     
                     closeModal();
                     alert(`Success! Saved as: ${data.result.new_filename}`);
