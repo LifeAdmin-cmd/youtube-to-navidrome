@@ -103,6 +103,16 @@ def delete_track():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+@app.route("/api/delete_all_failed", methods=["POST"])
+def delete_all_failed():
+    """Deletes all tracks marked as 'error'."""
+    try:
+        count = manager.delete_all_failed_tracks()
+        return jsonify({"status": "ok", "count": count})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 @app.route("/api/rerun_search/<track_uid>", methods=["POST"])
 def rerun_search(track_uid):
     """Performs a new Spotify search for the track using a custom or original query."""

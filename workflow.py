@@ -111,6 +111,23 @@ class WorkflowManager:
         self._save_state()
         return True
 
+    def delete_all_failed_tracks(self) -> int:
+        """Deletes all tracks with status 'error' from session and disk."""
+        # Create a list first to avoid RuntimeError for changing dict size during iteration
+        failed_uids = [
+            uid for uid, track in self.tracks.items() if track["status"] == "error"
+        ]
+
+        count = 0
+        for uid in failed_uids:
+            try:
+                self.delete_track(uid)
+                count += 1
+            except Exception as e:
+                print(f"[System] Error deleting failed track {uid}: {e}")
+
+        return count
+
     def _download_and_process(self, url: str, info: Dict) -> Path:
         """Helper to download, sponsorblock, and cut a video."""
         # 1. Download

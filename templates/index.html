@@ -79,7 +79,10 @@
     </div>
 
     <div class="card" id="resultsCard" style="display:none;">
-        <h3>Downloaded / Processed Tracks</h3>
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+            <h3 style="margin: 0;">Downloaded / Processed Tracks</h3>
+            <button id="deleteAllFailedBtn" onclick="deleteAllFailed()" class="delete-btn" style="display:none; width: auto; font-size:14px; padding:6px 10px;">Delete All Failed</button>
+        </div>
         <table>
             <thead>
                 <tr>
@@ -147,6 +150,12 @@
                     if (tracks.length > 0) {
                         document.getElementById('resultsCard').style.display = "block";
                         
+                        // Check for errors to show the delete button
+                        const hasErrors = tracks.some(t => t.status === 'error');
+                        if (hasErrors) {
+                            document.getElementById('deleteAllFailedBtn').style.display = "block";
+                        }
+
                         // Add a log message
                         const div = document.createElement('div');
                         div.className = `log-entry status-skipped`; // Use skipped styling as neutral warning
@@ -189,6 +198,11 @@
                     div.innerText = data.message;
                     const lc = document.getElementById('logContainer');
                     lc.insertBefore(div, lc.firstChild);
+                }
+                
+                // Show delete all button if a new error occurs
+                if (data.status === 'error') {
+                    document.getElementById('deleteAllFailedBtn').style.display = "block";
                 }
 
                 // Add row to table for success, skipped, OR error
@@ -414,6 +428,27 @@
             });
         }
 
+        function deleteAllFailed() {
+            if (!confirm("Are you sure you want to delete all failed tracks?")) return;
+            
+            fetch('/api/delete_all_failed', { method: 'POST' })
+            .then(res => res.json())
+            .then(data => {
+                if (data.status === 'ok') {
+                    alert(`Deleted ${data.count} failed tracks.`);
+                    // Remove all error rows from the table
+                    const rows = document.querySelectorAll('.row-error');
+                    rows.forEach(row => row.remove());
+                    // Hide the button
+                    document.getElementById('deleteAllFailedBtn').style.display = "none";
+                } else {
+                    alert("Error: " + data.message);
+                }
+            })
+            .catch(err => {
+                alert("Request failed: " + err);
+            });
+        }
         
         window.onclick = function(event) {
             if (event.target == document.getElementById('editModal')) closeModal();
