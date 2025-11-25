@@ -44,6 +44,17 @@ def stream():
     return Response(stream_with_context(generate()), mimetype="text/event-stream")
 
 
+@app.route("/stream_retry")
+def stream_retry():
+    """Stream endpoint for retrying all failed tracks."""
+
+    def generate():
+        for update_json in manager.retry_failed_tracks():
+            yield f"data: {update_json}\n\n"
+
+    return Response(stream_with_context(generate()), mimetype="text/event-stream")
+
+
 @app.route("/cancel", methods=["POST"])
 def cancel():
     manager.cancel_event.set()

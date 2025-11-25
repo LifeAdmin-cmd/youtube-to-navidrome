@@ -290,6 +290,49 @@ class WorkflowManager:
             # Fatal error during playlist extraction/pre-check
             yield json.dumps({"status": "fatal_error", "message": str(e)})
 
+    def retry_failed_tracks(self) -> Iterator[str]:
+        """Retries processing for all tracks with status 'error'."""
+        self.cancel_event.clear()
+
+        # Identify failed tracks
+        failed_uids = [
+            uid for uid, track in self.tracks.items() if track["status"] == "error"
+        ]
+        total = len(failed_uids)
+
+        if total == 0:
+            yield json.dumps(
+                {
+                    "status": "finished",
+                    "message": "No failed tracks to retry.",
+                    "progress": 100,
+                }
+            )
+            return
+
+        yield json.dumps(
+            {
+                "status": "processing",
+                "message": f"Retrying {total} failed tracks...",
+                "progress": 0,
+            }
+        )
+
+        for i, uid in enumerate(failed_uids):
+            self.check_cancel()
+            progress = int((i / total) * 100)
+
+            # Delegate to the shared processing logic using the existing track data
+            yield from self._process_track_execution(uid, progress)
+
+        yield json.dumps(
+            {
+                "status": "finished",
+                "message": "Retry operations completed!",
+                "progress": 100,
+            }
+        )
+
     def _process_video(
         self, url: str, pre_info: Dict, base_progress: int
     ) -> Iterator[str]:
@@ -304,7 +347,6 @@ class WorkflowManager:
                 info = pre_info
 
             title = info.get("title")
-            uploader = info.get("uploader")
 
             self.tracks[track_uid] = {
                 "video_info": info,
@@ -325,6 +367,44 @@ class WorkflowManager:
                 }
             )
 
+            # Use the shared execution logic
+            yield from self._process_track_execution(track_uid, base_progress)
+
+        except Exception as e:
+            if isinstance(e, OperationCancelled):
+                raise e
+
+            # Log errors occurring during setup/init
+            if track_uid in self.tracks:
+                self.tracks[track_uid]["status"] = "error"
+                self._save_state()
+
+            yield json.dumps(
+                {
+                    "status": "error",
+                    "message": f"Error processing {url}: {str(e)}",
+                    "progress": base_progress,
+                    "track_uid": track_uid,
+                    "youtube_title": title,
+                    "spotify_title": None,
+                    "spotify_artist": None,
+                }
+            )
+
+    def _process_track_execution(
+        self, track_uid: str, base_progress: int
+    ) -> Iterator[str]:
+        """
+        Executes the Search -> Download -> Tag workflow for an existing track entry.
+        Used by both fresh processing and retries.
+        """
+        track = self.tracks[track_uid]
+        title = track["youtube_title"]
+        uploader = track["video_info"].get("uploader")
+        url = track["url"]
+        info = track["video_info"]
+
+        try:
             # 2. Spotify Search (With Retries up to MAX_SEARCH_ATTEMPTS)
             spotify_result = None
             candidates = []
@@ -409,7 +489,7 @@ class WorkflowManager:
             yield json.dumps(
                 {
                     "status": "processing",
-                    "message": "Downloading & Processing...",
+                    "message": f"Downloading & Processing ({title})...",
                     "progress": base_progress,
                 }
             )
@@ -453,7 +533,7 @@ class WorkflowManager:
             yield json.dumps(
                 {
                     "status": "error",
-                    "message": f"Error processing {url}: {str(e)}",
+                    "message": f"Error processing {title}: {str(e)}",
                     "progress": base_progress,
                     "track_uid": track_uid,
                     "youtube_title": title,

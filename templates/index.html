@@ -81,7 +81,10 @@
     <div class="card" id="resultsCard" style="display:none;">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
             <h3 style="margin: 0;">Downloaded / Processed Tracks</h3>
-            <button id="deleteAllFailedBtn" onclick="deleteAllFailed()" class="delete-btn" style="display:none; width: auto; font-size:14px; padding:6px 10px;">Delete All Failed</button>
+            <div>
+                <button id="retryAllFailedBtn" onclick="retryAllFailed()" class="edit-btn" style="display:none; width: auto; font-size:14px; padding:6px 10px; background-color: #17a2b8; margin-right: 5px;">Retry All Failed</button>
+                <button id="deleteAllFailedBtn" onclick="deleteAllFailed()" class="delete-btn" style="display:none; width: auto; font-size:14px; padding:6px 10px;">Delete All Failed</button>
+            </div>
         </div>
         <table>
             <thead>
@@ -150,10 +153,11 @@
                     if (tracks.length > 0) {
                         document.getElementById('resultsCard').style.display = "block";
                         
-                        // Check for errors to show the delete button
+                        // Check for errors to show the buttons
                         const hasErrors = tracks.some(t => t.status === 'error');
                         if (hasErrors) {
-                            document.getElementById('deleteAllFailedBtn').style.display = "block";
+                            document.getElementById('deleteAllFailedBtn').style.display = "inline-block";
+                            document.getElementById('retryAllFailedBtn').style.display = "inline-block";
                         }
 
                         // Add a log message
@@ -173,7 +177,21 @@
         function startProcess() {
             const url = document.getElementById('url').value;
             if (!url) return alert("Please enter a URL");
+            
+            setupEventStream(`/stream?url=${encodeURIComponent(url)}`);
+        }
 
+        function retryAllFailed() {
+             if (!confirm("Are you sure you want to retry tagging all failed songs?")) return;
+             
+             // Hide the buttons while processing
+             document.getElementById('retryAllFailedBtn').style.display = "none";
+             document.getElementById('deleteAllFailedBtn').style.display = "none";
+             
+             setupEventStream('/stream_retry');
+        }
+
+        function setupEventStream(endpoint) {
             document.getElementById('startBtn').disabled = true;
             document.getElementById('cancelBtn').disabled = false;
             // Note: logContainer and resultsBody are NOT cleared here to preserve failed songs from the previous session
@@ -182,7 +200,7 @@
             document.getElementById('resultsCard').style.display = "block";
 
             if (eventSource) eventSource.close();
-            eventSource = new EventSource(`/stream?url=${encodeURIComponent(url)}`);
+            eventSource = new EventSource(endpoint);
 
             eventSource.onmessage = function(event) {
                 const data = JSON.parse(event.data);
@@ -200,9 +218,10 @@
                     lc.insertBefore(div, lc.firstChild);
                 }
                 
-                // Show delete all button if a new error occurs
+                // Show action buttons if a new error occurs
                 if (data.status === 'error') {
-                    document.getElementById('deleteAllFailedBtn').style.display = "block";
+                    document.getElementById('deleteAllFailedBtn').style.display = "inline-block";
+                    document.getElementById('retryAllFailedBtn').style.display = "inline-block";
                 }
 
                 // Add row to table for success, skipped, OR error
@@ -439,8 +458,9 @@
                     // Remove all error rows from the table
                     const rows = document.querySelectorAll('.row-error');
                     rows.forEach(row => row.remove());
-                    // Hide the button
+                    // Hide the buttons
                     document.getElementById('deleteAllFailedBtn').style.display = "none";
+                    document.getElementById('retryAllFailedBtn').style.display = "none";
                 } else {
                     alert("Error: " + data.message);
                 }
@@ -463,6 +483,13 @@
             if (eventSource) { eventSource.close(); eventSource = null; }
             document.getElementById('startBtn').disabled = false;
             document.getElementById('cancelBtn').disabled = true;
+            
+            // Re-check for remaining errors to potentially show buttons again
+            const errorRows = document.querySelectorAll('.row-error');
+            if (errorRows.length > 0) {
+                 document.getElementById('deleteAllFailedBtn').style.display = "inline-block";
+                 document.getElementById('retryAllFailedBtn').style.display = "inline-block";
+            }
         }
     </script>
 
