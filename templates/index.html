@@ -91,6 +91,7 @@
                 <tr>
                     <th>YouTube Title</th>
                     <th>Spotify Proposed</th>
+                    <th>Score</th>
                     <th>Status</th>
                     <th>Action</th>
                 </tr>
@@ -155,12 +156,12 @@
                         
                         // Populate Table
                         tracks.forEach(track => {
-                             // Use helper to adapt track object to expected format
                              const rowData = {
                                  track_uid: track.track_uid,
                                  youtube_title: track.youtube_title,
                                  spotify_title: track.best_match_tags ? track.best_match_tags.Title : null,
                                  spotify_artist: track.best_match_tags ? track.best_match_tags.Artist : null,
+                                 match_score: track.match_score,
                                  status: track.status
                              };
                              addResultRow(rowData);
@@ -209,7 +210,7 @@
                 if (data.status === 'ok') {
                     // Clear logs if you want fresh logs on new run (optional, backend cleared them)
                     document.getElementById('logContainer').innerHTML = "";
-                    document.getElementById('resultsBody').innerHTML = ""; // Clear table for new run? Or append? usually new run clears
+                    document.getElementById('resultsBody').innerHTML = ""; 
                     
                     document.getElementById('startBtn').disabled = true;
                     document.getElementById('cancelBtn').disabled = false;
@@ -310,23 +311,18 @@
 
             const statusLabel = data.status.charAt(0).toUpperCase() + data.status.slice(1);
             const spotifyText = data.spotify_title ? `${data.spotify_artist} - ${data.spotify_title}` : 'No Match';
+            const scoreVal = (data.match_score !== undefined) ? Math.round(data.match_score * 100) + '%' : '';
 
             tr.innerHTML = `
                 <td>${data.youtube_title || 'Unknown'}</td>
                 <td class="spotify-title">${spotifyText}</td>
+                <td class="score-cell">${scoreVal}</td>
                 <td class="status-cell">${statusLabel}</td>
                 <td><button class="edit-btn" onclick="openEditModal('${data.track_uid}')">Edit</button></td>
             `;
             tbody.appendChild(tr);
         }
 
-        // ... Keep existing helper functions: 
-        // displayCandidates, openEditModal, openRerunSearchModal, submitRerunSearch, 
-        // closeModal, closeRerunSearchModal, selectCandidate, deleteTrackFromModal, deleteAllFailed
-        // window.onclick, cancelProcess, stopEventStream (updated below) ...
-        
-        // PASTE THESE EXISTING FUNCTIONS HERE:
-        
         function displayCandidates(listElementId, candidates) {
             const list = document.getElementById(listElementId);
             list.innerHTML = "";
@@ -445,6 +441,10 @@
                         row.className = "";
                         row.querySelector('.spotify-title').innerText = `${data.result.spotify_artist} - ${data.result.spotify_title}`;
                         row.querySelector('.status-cell').innerText = "Success";
+                        // Update score to 100% since it was manual
+                        if (data.result.match_score) {
+                            row.querySelector('.score-cell').innerText = Math.round(data.result.match_score * 100) + '%';
+                        }
                     }
                     closeModal();
                     alert(`Success! Saved as: ${data.result.new_filename}`);

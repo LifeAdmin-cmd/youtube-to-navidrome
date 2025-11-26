@@ -156,7 +156,10 @@ class SpotifyClient:
 
         if best_track:
             print(f"[Spotify] Match: '{best_track['name']}' (Score: {best_score:.2f})")
-            result["best_match"] = self.get_track_metadata(best_track["id"])
+            meta = self.get_track_metadata(best_track["id"])
+            # Inject score into metadata so it bubbles up to workflow
+            meta["score"] = best_score
+            result["best_match"] = meta
 
         return result
 

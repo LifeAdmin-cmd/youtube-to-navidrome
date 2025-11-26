@@ -392,8 +392,6 @@ class WorkflowManager:
             self.is_active = False
             self._save_state()
 
-    # --- Rest of the methods (cleanup, delete_track, etc.) remain mostly same but ensure using self.state_lock ---
-
     def check_cancel(self):
         if self.cancel_event.is_set():
             raise OperationCancelled("Cancelled by user.")
@@ -445,9 +443,6 @@ class WorkflowManager:
             except Exception as e:
                 print(f"Error deleting {uid}: {e}")
         return count
-
-    # ... include _download_and_process, rerun_spotify_search, update_track_tags from previous version ...
-    # (Just ensure they rely on self.state_lock and existing logic)
 
     def _download_and_process(self, url: str, info: Dict) -> Path:
         raw_file = self.downloader.download_video(url, info)
@@ -516,11 +511,13 @@ class WorkflowManager:
             self.tracks[track_uid]["path"] = new_path
             self.tracks[track_uid]["status"] = "success"
             self.tracks[track_uid]["best_match_tags"] = tags
+            self.tracks[track_uid]["match_score"] = 1.0  # Manual selection = 100%
             self._save_state()
         return {
             "new_filename": new_path.name,
             "spotify_title": tags["Title"],
             "spotify_artist": tags["Artist"],
+            "match_score": 1.0,
         }
 
     def _worker_wrapper(self, func, msg_queue: queue.Queue, *args, **kwargs):
@@ -540,13 +537,9 @@ class WorkflowManager:
                 json.dumps({"status": "error", "message": f"Thread crashed: {e}"})
             )
 
-    # KEEP THE EXISTING _process_video and _process_track_execution methods
-    # (Copy them exactly as they were in the previous successful version,
-    #  they are called by the threads).
     def _process_video(
         self, url: str, pre_info: Dict, base_progress: int
     ) -> Iterator[str]:
-        # ... logic identical to previous turn ...
         self.check_cancel()
         track_uid = str(uuid.uuid4())
         title = pre_info.get("title", "Unknown")
@@ -566,6 +559,7 @@ class WorkflowManager:
                     "path": None,
                     "status": "pending",
                     "best_match_tags": None,
+                    "match_score": 0.0,
                 }
                 self._save_state()
             yield json.dumps(
@@ -596,7 +590,6 @@ class WorkflowManager:
     def _process_track_execution(
         self, track_uid: str, base_progress: int
     ) -> Iterator[str]:
-        # ... logic identical to previous turn ...
         self.check_cancel()
         with self.state_lock:
             track = self.tracks[track_uid]
@@ -608,6 +601,7 @@ class WorkflowManager:
             spotify_result = None
             candidates = []
             tags = None
+            match_score = 0.0
             last_error = None
             for attempt in range(1, self.MAX_SEARCH_ATTEMPTS + 1):
                 self.check_cancel()
@@ -618,6 +612,8 @@ class WorkflowManager:
                     if search_res["best_match"]:
                         spotify_result = search_res["best_match"]
                         tags = spotify_result["tags"]
+                        # The modified Spotify client returns the score in the metadata
+                        match_score = spotify_result.get("score", 0.0)
                         candidates = search_res["candidates"]
                         break
                     candidates = search_res["candidates"]
@@ -634,6 +630,7 @@ class WorkflowManager:
             with self.state_lock:
                 self.tracks[track_uid]["candidates"] = candidates
                 self.tracks[track_uid]["best_match_tags"] = tags
+                self.tracks[track_uid]["match_score"] = match_score
 
             if not spotify_result:
                 with self.state_lock:
@@ -665,6 +662,7 @@ class WorkflowManager:
                         "youtube_title": title,
                         "spotify_title": tags["Title"],
                         "spotify_artist": tags["Artist"],
+                        "match_score": match_score,
                     }
                 )
                 return
@@ -691,6 +689,7 @@ class WorkflowManager:
                     "youtube_title": title,
                     "spotify_title": tags["Title"],
                     "spotify_artist": tags["Artist"],
+                    "match_score": match_score,
                     "progress": base_progress,
                 }
             )
