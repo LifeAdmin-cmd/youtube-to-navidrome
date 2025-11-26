@@ -1,6 +1,7 @@
 import base64
 import os
 import re
+import threading
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -19,27 +20,29 @@ class SpotifyClient:
         self.client_id = client_id or os.getenv("SPOTIFY_CLIENT_ID")
         self.client_secret = client_secret or os.getenv("SPOTIFY_CLIENT_SECRET")
         self._token = None
+        self._lock = threading.Lock()
 
     def _get_token(self) -> str:
-        if self._token:
+        with self._lock:
+            if self._token:
+                return self._token
+
+            if not self.client_id or not self.client_secret:
+                raise ValueError("Spotify credentials missing.")
+
+            auth_str = f"{self.client_id}:{self.client_secret}"
+            auth_b64 = base64.b64encode(auth_str.encode()).decode()
+
+            headers = {
+                "Authorization": f"Basic {auth_b64}",
+                "Content-Type": "application/x-www-form-urlencoded",
+            }
+            data = {"grant_type": "client_credentials"}
+
+            resp = requests.post(self.AUTH_URL, headers=headers, data=data, timeout=10)
+            resp.raise_for_status()
+            self._token = resp.json().get("access_token")
             return self._token
-
-        if not self.client_id or not self.client_secret:
-            raise ValueError("Spotify credentials missing.")
-
-        auth_str = f"{self.client_id}:{self.client_secret}"
-        auth_b64 = base64.b64encode(auth_str.encode()).decode()
-
-        headers = {
-            "Authorization": f"Basic {auth_b64}",
-            "Content-Type": "application/x-www-form-urlencoded",
-        }
-        data = {"grant_type": "client_credentials"}
-
-        resp = requests.post(self.AUTH_URL, headers=headers, data=data, timeout=10)
-        resp.raise_for_status()
-        self._token = resp.json().get("access_token")
-        return self._token
 
     def _get_headers(self) -> Dict[str, str]:
         return {"Authorization": f"Bearer {self._get_token()}"}
