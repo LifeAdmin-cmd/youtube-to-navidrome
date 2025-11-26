@@ -179,10 +179,12 @@ class WorkflowManager:
 
         self.cancel_event.clear()
         self.is_active = True
-        self.logs = (
-            []
-        )  # Clear logs on new run? Or keep? User asked to clear "current queue". Let's clear logs for new run.
-        self._save_state()  # Save empty logs
+
+        # --- CLEARS THE QUEUE ---
+        with self.state_lock:
+            self.logs = []
+            self.tracks = {}  # Explicitly clear tracks from the previous run
+            self._save_state()
 
         thread = threading.Thread(target=self._run_background_task, args=(url,))
         thread.daemon = True
@@ -200,7 +202,7 @@ class WorkflowManager:
         thread.daemon = True
         thread.start()
 
-    # --- Internal Background Tasks (Modified from old process_url) ---
+    # --- Internal Background Tasks ---
 
     def _run_background_task(self, url: str):
         self._broadcast(
@@ -237,7 +239,7 @@ class WorkflowManager:
                     entry.get("url")
                     or f"https://www.youtube.com/watch?v={entry.get('id')}"
                 )
-                # We can approximate progress for the *submission* phase, but real progress is async
+
                 future = executor.submit(
                     self._worker_wrapper,
                     self._process_video,
@@ -261,9 +263,6 @@ class WorkflowManager:
                     if isinstance(msg, str):
                         msg = json.loads(msg)
 
-                    # Update progress calculation?
-                    # Calculating accurate progress with parallel threads is tricky.
-                    # We can use finished_count / total
                     current_prog = int((finished_count / total) * 100)
                     if msg.get("progress") == 0:
                         msg["progress"] = current_prog
