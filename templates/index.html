@@ -142,99 +142,131 @@
         let eventSource = null;
         let currentTrackUid = null;
 
-        // NEW: Load failed tracks on page load
-        document.addEventListener('DOMContentLoaded', loadFailedTracks);
-        
-        function loadFailedTracks() {
-            fetch('/api/failed_tracks')
+        document.addEventListener('DOMContentLoaded', restoreState);
+
+        function restoreState() {
+            fetch('/api/state')
                 .then(res => res.json())
                 .then(data => {
+                    // Restore Table
                     const tracks = data.tracks;
                     if (tracks.length > 0) {
                         document.getElementById('resultsCard').style.display = "block";
                         
-                        // Check for errors to show the buttons
+                        // Populate Table
+                        tracks.forEach(track => {
+                             // Use helper to adapt track object to expected format
+                             const rowData = {
+                                 track_uid: track.track_uid,
+                                 youtube_title: track.youtube_title,
+                                 spotify_title: track.best_match_tags ? track.best_match_tags.Title : null,
+                                 spotify_artist: track.best_match_tags ? track.best_match_tags.Artist : null,
+                                 status: track.status
+                             };
+                             addResultRow(rowData);
+                        });
+                        
+                        // Check for errors
                         const hasErrors = tracks.some(t => t.status === 'error');
                         if (hasErrors) {
                             document.getElementById('deleteAllFailedBtn').style.display = "inline-block";
                             document.getElementById('retryAllFailedBtn').style.display = "inline-block";
                         }
+                    }
 
-                        // Add a log message
-                        const div = document.createElement('div');
-                        div.className = `log-entry status-skipped`; // Use skipped styling as neutral warning
-                        div.innerText = `Loaded ${tracks.length} previously failed tracks.`;
-                        document.getElementById('logContainer').insertBefore(div, document.getElementById('logContainer').firstChild);
+                    // Restore Logs
+                    const logs = data.logs;
+                    logs.forEach(msg => {
+                         appendLog(msg.message, msg.status);
+                    });
 
-                        tracks.forEach(track => {
-                            addResultRow(track);
-                        });
+                    // Restore Progress UI if active
+                    if (data.is_active) {
+                        document.getElementById('startBtn').disabled = true;
+                        document.getElementById('cancelBtn').disabled = false;
+                        document.getElementById('progressContainer').style.display = "block";
+                        updateProgressBar(data.current_progress);
+                        
+                        // Reconnect to stream
+                        connectStream();
                     }
                 })
-                .catch(err => console.error("Failed to load failed tracks:", err));
+                .catch(err => console.error("Failed to restore state:", err));
         }
 
         function startProcess() {
             const url = document.getElementById('url').value;
             if (!url) return alert("Please enter a URL");
             
-            setupEventStream(`/stream?url=${encodeURIComponent(url)}`);
+            // 1. Trigger Start via POST
+            fetch('/start', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({url: url})
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.status === 'ok') {
+                    // Clear logs if you want fresh logs on new run (optional, backend cleared them)
+                    document.getElementById('logContainer').innerHTML = "";
+                    document.getElementById('resultsBody').innerHTML = ""; // Clear table for new run? Or append? usually new run clears
+                    
+                    document.getElementById('startBtn').disabled = true;
+                    document.getElementById('cancelBtn').disabled = false;
+                    document.getElementById('progressContainer').style.display = "block";
+                    updateProgressBar(0);
+                    
+                    connectStream();
+                } else {
+                    alert("Error: " + data.message);
+                }
+            })
+            .catch(err => alert("Request failed: " + err));
         }
 
         function retryAllFailed() {
              if (!confirm("Are you sure you want to retry tagging all failed songs?")) return;
              
-             // Hide the buttons while processing
              document.getElementById('retryAllFailedBtn').style.display = "none";
              document.getElementById('deleteAllFailedBtn').style.display = "none";
              
-             setupEventStream('/stream_retry');
+             fetch('/start_retry', { method: 'POST' })
+             .then(res => res.json())
+             .then(data => {
+                 if(data.status === 'ok') {
+                     document.getElementById('startBtn').disabled = true;
+                     document.getElementById('cancelBtn').disabled = false;
+                     connectStream();
+                 } else {
+                     alert("Error: " + data.message);
+                 }
+             });
         }
 
-        function setupEventStream(endpoint) {
-            document.getElementById('startBtn').disabled = true;
-            document.getElementById('cancelBtn').disabled = false;
-            // Note: logContainer and resultsBody are NOT cleared here to preserve failed songs from the previous session
-            document.getElementById('progressBar').style.width = "0%";
-            document.getElementById('progressContainer').style.display = "block";
-            document.getElementById('resultsCard').style.display = "block";
-
+        function connectStream() {
             if (eventSource) eventSource.close();
-            eventSource = new EventSource(endpoint);
+            eventSource = new EventSource('/stream');
 
             eventSource.onmessage = function(event) {
                 const data = JSON.parse(event.data);
 
                 if (data.progress !== undefined) {
-                    document.getElementById('progressBar').style.width = data.progress + "%";
-                    document.getElementById('progressBar').innerText = data.progress + "%";
+                    updateProgressBar(data.progress);
                 }
 
                 if (data.message) {
-                    const div = document.createElement('div');
-                    div.className = `log-entry status-${data.status}`;
-                    div.innerText = data.message;
-                    const lc = document.getElementById('logContainer');
-                    lc.insertBefore(div, lc.firstChild);
+                    appendLog(data.message, data.status);
                 }
                 
-                // Show action buttons if a new error occurs
                 if (data.status === 'error') {
                     document.getElementById('deleteAllFailedBtn').style.display = "inline-block";
                     document.getElementById('retryAllFailedBtn').style.display = "inline-block";
                 }
 
-                // Add row to table for success, skipped, OR error
                 if (["success", "skipped", "error"].includes(data.status)) {
-                    // Only add if we have track_uid (which error/skipped/success messages should have)
                     if (data.track_uid) {
-                        // If the row already exists (e.g. it was an error and now retrying to success), 
-                        // remove it first so we can re-add the updated version
                         const existingRow = document.getElementById(`row-${data.track_uid}`);
-                        if (existingRow) {
-                            existingRow.remove();
-                        }
-                        
+                        if (existingRow) existingRow.remove();
                         addResultRow(data);
                     }
                 }
@@ -244,23 +276,37 @@
                 }
             };
             
-            eventSource.onerror = stopEventStream;
+            eventSource.onerror = () => {
+                // If stream closes unexpectedly (server restart?), stop trying
+                // stopEventStream();
+            };
+        }
+
+        function updateProgressBar(val) {
+             document.getElementById('progressBar').style.width = val + "%";
+             document.getElementById('progressBar').innerText = val + "%";
+        }
+
+        function appendLog(msg, status) {
+            const div = document.createElement('div');
+            div.className = `log-entry status-${status}`;
+            div.innerText = msg;
+            const lc = document.getElementById('logContainer');
+            lc.insertBefore(div, lc.firstChild);
         }
 
         function addResultRow(data) {
             const tbody = document.getElementById('resultsBody');
-            
-            // Avoid duplicates if multiple messages sent for same ID
             if(document.getElementById(`row-${data.track_uid}`)) return;
+            
+            // Ensure card is visible
+            document.getElementById('resultsCard').style.display = "block";
 
             const tr = document.createElement('tr');
             tr.id = `row-${data.track_uid}`;
             
-            if(data.status === 'skipped') {
-                tr.className = 'row-skipped';
-            } else if (data.status === 'error') {
-                tr.className = 'row-error';
-            }
+            if(data.status === 'skipped') tr.className = 'row-skipped';
+            else if (data.status === 'error') tr.className = 'row-error';
 
             const statusLabel = data.status.charAt(0).toUpperCase() + data.status.slice(1);
             const spotifyText = data.spotify_title ? `${data.spotify_artist} - ${data.spotify_title}` : 'No Match';
@@ -274,6 +320,13 @@
             tbody.appendChild(tr);
         }
 
+        // ... Keep existing helper functions: 
+        // displayCandidates, openEditModal, openRerunSearchModal, submitRerunSearch, 
+        // closeModal, closeRerunSearchModal, selectCandidate, deleteTrackFromModal, deleteAllFailed
+        // window.onclick, cancelProcess, stopEventStream (updated below) ...
+        
+        // PASTE THESE EXISTING FUNCTIONS HERE:
+        
         function displayCandidates(listElementId, candidates) {
             const list = document.getElementById(listElementId);
             list.innerHTML = "";
@@ -310,33 +363,26 @@
         }
         
         function openRerunSearchModal() {
-            // Close the main edit modal
             document.getElementById('editModal').style.display = "none";
-            
             const trackTitleSpan = document.getElementById('rerunTrackTitle');
             const queryHintSpan = document.getElementById('originalQueryHint');
             const rerunInput = document.getElementById('rerunQueryInput');
             
-            // Clear results and enable button
             document.getElementById('rerunCandidateList').innerHTML = "<p>Click 'Search' to get new results.</p>";
             document.getElementById('rerunCandidateHeader').innerText = "Search Results";
             document.getElementById('rerunSearchBtn').disabled = false;
 
-            // Fetch info for the modal
             fetch(`/api/candidates/${currentTrackUid}`)
                 .then(res => res.json())
                 .then(data => {
                     trackTitleSpan.innerText = data.youtube_title;
                     queryHintSpan.innerText = data.original_query;
-                    
-                    // Pre-fill the input with the original query and select it for easy overwriting
                     rerunInput.value = data.original_query;
                     rerunInput.select(); 
-
                     document.getElementById('rerunSearchModal').style.display = "block";
                 })
                 .catch(err => {
-                    alert("Failed to load track info for rerun: " + err);
+                    alert("Failed to load track info: " + err);
                     closeRerunSearchModal();
                 });
         }
@@ -344,7 +390,6 @@
         function submitRerunSearch() {
             const query = document.getElementById('rerunQueryInput').value;
             const uid = currentTrackUid;
-
             if (!uid) return;
             
             document.getElementById('rerunSearchBtn').disabled = true;
@@ -358,12 +403,10 @@
             .then(res => res.json())
             .then(data => {
                 document.getElementById('rerunSearchBtn').disabled = false;
-                
                 if(data.status === 'ok') {
                     const result = data.result;
                     document.getElementById('rerunCandidateHeader').innerText = `Search Results (Query: ${result.query_used})`;
                     displayCandidates('rerunCandidateList', result.candidates);
-
                 } else {
                     document.getElementById('rerunCandidateList').innerHTML = `<p>Error: ${data.message}</p>`;
                 }
@@ -384,13 +427,10 @@
         }
 
         function selectCandidate(spotifyId) {
-            if(!confirm("Process file with this metadata? This may trigger a re-download.")) return;
-            
-            // Indicate processing in both modals in case user is in rerun modal
+            if(!confirm("Process file with this metadata?")) return;
             document.getElementById('candidateList').innerHTML = "<p>Processing... Please wait.</p>";
             const rerunList = document.getElementById('rerunCandidateList');
             if (rerunList) rerunList.innerHTML = "<p>Processing... Please wait.</p>";
-
 
             fetch('/api/update_tag', {
                 method: 'POST',
@@ -401,14 +441,11 @@
             .then(data => {
                 if(data.status === 'ok') {
                     const row = document.getElementById(`row-${currentTrackUid}`);
-                    
-                    // Update row to show success instead of removing it
                     if (row) {
-                        row.className = ""; // Remove skipped/error classes
+                        row.className = "";
                         row.querySelector('.spotify-title').innerText = `${data.result.spotify_artist} - ${data.result.spotify_title}`;
                         row.querySelector('.status-cell').innerText = "Success";
                     }
-                    
                     closeModal();
                     alert(`Success! Saved as: ${data.result.new_filename}`);
                 } else {
@@ -424,7 +461,7 @@
         
         function deleteTrackFromModal() {
             if (!currentTrackUid) return;
-            if (!confirm("Are you sure you want to delete this file? This cannot be undone.")) return;
+            if (!confirm("Are you sure you want to delete this file?")) return;
 
             fetch('/api/delete_track', {
                 method: 'POST',
@@ -434,41 +471,29 @@
             .then(res => res.json())
             .then(data => {
                 if (data.status === 'ok') {
-                    // Remove the row from the table
                     const row = document.getElementById(`row-${currentTrackUid}`);
                     if (row) row.remove();
-                    
                     closeModal();
                     alert("File deleted successfully.");
                 } else {
-                    alert("Error deleting file: " + data.message);
+                    alert("Error: " + data.message);
                 }
-            })
-            .catch(err => {
-                alert("Delete request failed: " + err);
             });
         }
 
         function deleteAllFailed() {
-            if (!confirm("Are you sure you want to delete all failed tracks?")) return;
-            
+            if (!confirm("Delete all failed tracks?")) return;
             fetch('/api/delete_all_failed', { method: 'POST' })
             .then(res => res.json())
             .then(data => {
                 if (data.status === 'ok') {
                     alert(`Deleted ${data.count} failed tracks.`);
-                    // Remove all error rows from the table
-                    const rows = document.querySelectorAll('.row-error');
-                    rows.forEach(row => row.remove());
-                    // Hide the buttons
+                    document.querySelectorAll('.row-error').forEach(row => row.remove());
                     document.getElementById('deleteAllFailedBtn').style.display = "none";
                     document.getElementById('retryAllFailedBtn').style.display = "none";
                 } else {
                     alert("Error: " + data.message);
                 }
-            })
-            .catch(err => {
-                alert("Request failed: " + err);
             });
         }
         
@@ -486,7 +511,6 @@
             document.getElementById('startBtn').disabled = false;
             document.getElementById('cancelBtn').disabled = true;
             
-            // Re-check for remaining errors to potentially show buttons again
             const errorRows = document.querySelectorAll('.row-error');
             if (errorRows.length > 0) {
                  document.getElementById('deleteAllFailedBtn').style.display = "inline-block";

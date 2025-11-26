@@ -1,5 +1,3 @@
-import json
-
 from dotenv import load_dotenv
 from flask import (
     Flask,
@@ -10,7 +8,6 @@ from flask import (
     stream_with_context,
 )
 
-# Import the Class from your new workflow file
 from workflow import WorkflowManager
 
 load_dotenv()
@@ -26,31 +23,58 @@ def index():
     return render_template("index.html")
 
 
+@app.route("/api/state")
+def get_state():
+    """Returns full current state for UI restoration."""
+    state = manager.get_full_state()
+    # Convert Path objects to strings for JSON serialization if necessary
+    # (manager.get_full_state returns serializable tracks, but paths inside tracks need handling if not done yet)
+    # The _save_state logic handled paths, but self.tracks has Path objects in memory.
+
+    # Quick fix for serialization for the frontend
+    serializable_tracks = []
+    for uid, track in state["tracks"].items():
+        t = track.copy()
+        if t.get("path"):
+            t["path"] = str(t["path"])
+        t["track_uid"] = uid  # Ensure UID is in the object
+        serializable_tracks.append(t)
+
+    state["tracks"] = serializable_tracks
+    return jsonify(state)
+
+
+@app.route("/start", methods=["POST"])
+def start_process():
+    """Starts the download workflow in the background."""
+    data = request.json
+    youtube_url = data.get("url")
+    if not youtube_url:
+        return jsonify({"status": "error", "message": "No URL provided"}), 400
+
+    try:
+        manager.start_processing(youtube_url)
+        return jsonify({"status": "ok", "message": "Started"})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+
+
+@app.route("/start_retry", methods=["POST"])
+def start_retry_process():
+    try:
+        manager.start_retry()
+        return jsonify({"status": "ok", "message": "Retry started"})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+
+
 @app.route("/stream")
 def stream():
-    youtube_url = request.args.get("url")
-
-    if not youtube_url:
-        return (
-            "data: "
-            + json.dumps({"status": "error", "message": "No URL provided"})
-            + "\n\n"
-        )
+    """SSE endpoint that clients subscribe to."""
 
     def generate():
-        for update_json in manager.process_url(youtube_url):
-            yield f"data: {update_json}\n\n"
-
-    return Response(stream_with_context(generate()), mimetype="text/event-stream")
-
-
-@app.route("/stream_retry")
-def stream_retry():
-    """Stream endpoint for retrying all failed tracks."""
-
-    def generate():
-        for update_json in manager.retry_failed_tracks():
-            yield f"data: {update_json}\n\n"
+        for msg in manager.subscribe():
+            yield msg
 
     return Response(stream_with_context(generate()), mimetype="text/event-stream")
 
@@ -63,7 +87,6 @@ def cancel():
 
 @app.route("/api/candidates/<track_uid>", methods=["GET"])
 def get_candidates(track_uid):
-    """Returns the list of Spotify candidates for a specific download, plus track info for the modal."""
     track = manager.tracks.get(track_uid)
     if not track:
         return jsonify({"error": "Track not found"}), 404
@@ -83,7 +106,6 @@ def get_candidates(track_uid):
 
 @app.route("/api/update_tag", methods=["POST"])
 def update_tag():
-    """Updates the tags for a file using a new Spotify ID."""
     data = request.json
     track_uid = data.get("track_uid")
     spotify_id = data.get("spotify_id")
@@ -100,13 +122,10 @@ def update_tag():
 
 @app.route("/api/delete_track", methods=["POST"])
 def delete_track():
-    """Deletes the downloaded file associated with the track_uid."""
     data = request.json
     track_uid = data.get("track_uid")
-
     if not track_uid:
         return jsonify({"error": "Missing track_uid"}), 400
-
     try:
         manager.delete_track(track_uid)
         return jsonify({"status": "ok", "message": "File deleted."})
@@ -116,7 +135,6 @@ def delete_track():
 
 @app.route("/api/delete_all_failed", methods=["POST"])
 def delete_all_failed():
-    """Deletes all tracks marked as 'error'."""
     try:
         count = manager.delete_all_failed_tracks()
         return jsonify({"status": "ok", "count": count})
@@ -126,13 +144,10 @@ def delete_all_failed():
 
 @app.route("/api/rerun_search/<track_uid>", methods=["POST"])
 def rerun_search(track_uid):
-    """Performs a new Spotify search for the track using a custom or original query."""
     data = request.json
     custom_query = data.get("query")
-
     if not track_uid:
         return jsonify({"error": "Missing track_uid"}), 400
-
     try:
         result = manager.rerun_spotify_search(track_uid, custom_query)
         return jsonify({"status": "ok", "result": result})
@@ -140,31 +155,9 @@ def rerun_search(track_uid):
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
-@app.route("/api/failed_tracks", methods=["GET"])
-def get_failed_tracks():
-    """Returns a list of tracks that failed or were skipped, for display on page load."""
-    failed_tracks = []
-
-    for uid, track in manager.tracks.items():
-        # if track["status"] in ["error", "skipped"]:
-        if track["status"] in ["error"]:
-
-            tags = track.get("best_match_tags") or {}
-
-            # The structure needed matches the stream event data
-            failed_tracks.append(
-                {
-                    "track_uid": uid,
-                    "youtube_title": track["youtube_title"],
-                    # Use saved best match tags (present on skipped, None on error)
-                    "spotify_title": tags.get("Title"),
-                    "spotify_artist": tags.get("Artist"),
-                    "status": track["status"],
-                }
-            )
-
-    return jsonify({"tracks": failed_tracks})
-
+# NOTE: /api/failed_tracks is no longer strictly necessary if /api/state returns everything,
+# but we can keep it for backwards compat or specialized views if needed.
+# For now, UI will likely use /api/state.
 
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
