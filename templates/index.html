@@ -334,11 +334,19 @@
                 const div = document.createElement('div');
                 div.className = 'candidate-item';
                 div.onclick = () => selectCandidate(c.id);
+                
+                // Use a placeholder if image is null, AND handle 404 errors if the URL is invalid
+                const placeholder = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='50' height='50'%3E%3Crect width='50' height='50' fill='%23eee'/%3E%3Ctext x='50%25' y='50%25' dominant-baseline='middle' text-anchor='middle' font-family='sans-serif' font-size='10' fill='%23999'%3EN/A%3C/text%3E%3C/svg%3E";
+                const imgSrc = c.image ? c.image : placeholder;
+
                 div.innerHTML = `
-                    <img src="${c.image || ''}" class="candidate-img">
+                    <img src="${imgSrc}" 
+                         class="candidate-img" 
+                         onerror="this.onerror=null; this.src='${placeholder}';">
                     <div class="candidate-info">
                         <span class="candidate-title">${c.title}</span>
                         <span class="candidate-artist">${c.artist}</span>
+                        <span class="candidate-artist" style="font-size:11px; color:#999;">${c.album || ''}</span>
                     </div>
                     <span class="candidate-score">${(c.score * 100).toFixed(0)}%</span>
                 `;
