@@ -90,7 +90,7 @@
             <thead>
                 <tr>
                     <th>YouTube Title</th>
-                    <th>Spotify Proposed</th>
+                    <th>MusicBrainz Proposed</th>
                     <th>Score</th>
                     <th>Status</th>
                     <th>Action</th>
@@ -116,7 +116,7 @@
     <div id="rerunSearchModal" class="modal">
         <div class="modal-content">
             <span class="close" onclick="closeRerunSearchModal()">×</span>
-            <h3>Rerun Spotify Search</h3>
+            <h3>Rerun MusicBrainz Search</h3> </div>
             <p>Track: <span id="rerunTrackTitle" style="font-weight: bold;"></span></p>
             <p>Enter a custom search query or leave blank to use the original query: 
                <span id="originalQueryHint" style="font-style: italic; color: #666;"></span>
@@ -389,7 +389,7 @@
             if (!uid) return;
             
             document.getElementById('rerunSearchBtn').disabled = true;
-            document.getElementById('rerunCandidateList').innerHTML = "<p>Searching Spotify...</p>";
+            document.getElementById('rerunCandidateList').innerHTML = "<p>Searching MusizBrainz...</p>";
 
             fetch(`/api/rerun_search/${uid}`, {
                 method: 'POST',
