@@ -516,6 +516,7 @@ class WorkflowManager:
             "new_filename": new_path.name,
             "spotify_title": tags["Title"],
             "spotify_artist": tags["Artist"],
+            "spotify_cover": tags.get("Album Cover Art"),
             "match_score": 1.0,
         }
 
@@ -661,6 +662,7 @@ class WorkflowManager:
                         "youtube_title": title,
                         "spotify_title": tags["Title"],
                         "spotify_artist": tags["Artist"],
+                        "spotify_cover": tags.get("Album Cover Art"),
                         "match_score": match_score,
                     }
                 )
@@ -688,6 +690,7 @@ class WorkflowManager:
                     "youtube_title": title,
                     "spotify_title": tags["Title"],
                     "spotify_artist": tags["Artist"],
+                    "spotify_cover": tags.get("Album Cover Art"),
                     "match_score": match_score,
                     "progress": base_progress,
                 }

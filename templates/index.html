@@ -41,6 +41,11 @@
         /* Error row style (Red background) */
         .row-error { background-color: #ffe6e6; color: #a00; }
 
+        /* New Style for Album Art in Table */
+        .table-img { width: 50px; height: 50px; object-fit: cover; border-radius: 4px; display: block; }
+        .spotify-artist { color: #555; font-weight: 500; }
+        .spotify-title { color: #000; font-weight: 600; }
+
         /* Modal Styles */
         .modal { display: none; position: fixed; z-index: 1; left: 0; top: 0; width: 100%; height: 100%; overflow: auto; background-color: rgba(0,0,0,0.5); }
         .modal-content { background-color: #fff; margin: 10% auto; padding: 20px; border-radius: 10px; width: 80%; max-width: 600px; box-shadow: 0 5px 15px rgba(0,0,0,0.3); }
@@ -89,8 +94,10 @@
         <table>
             <thead>
                 <tr>
+                    <th style="width: 60px;">Cover</th>
                     <th>YouTube Title</th>
-                    <th>Spotify Proposed</th>
+                    <th>Artist</th>
+                    <th>Title</th>
                     <th>Score</th>
                     <th>Status</th>
                     <th>Action</th>
@@ -161,6 +168,7 @@
                                  youtube_title: track.youtube_title,
                                  spotify_title: track.best_match_tags ? track.best_match_tags.Title : null,
                                  spotify_artist: track.best_match_tags ? track.best_match_tags.Artist : null,
+                                 spotify_cover: track.best_match_tags ? track.best_match_tags["Album Cover Art"] : null,
                                  match_score: track.match_score,
                                  status: track.status
                              };
@@ -310,12 +318,16 @@
             else if (data.status === 'error') tr.className = 'row-error';
 
             const statusLabel = data.status.charAt(0).toUpperCase() + data.status.slice(1);
-            const spotifyText = data.spotify_title ? `${data.spotify_artist} - ${data.spotify_title}` : 'No Match';
+            const spotifyArtist = data.spotify_artist || '';
+            const spotifyTitle = data.spotify_title || '';
+            const coverImg = data.spotify_cover ? `<img src="${data.spotify_cover}" class="table-img">` : '';
             const scoreVal = (data.match_score !== undefined) ? Math.round(data.match_score * 100) + '%' : '';
 
             tr.innerHTML = `
+                <td>${coverImg}</td>
                 <td>${data.youtube_title || 'Unknown'}</td>
-                <td class="spotify-title">${spotifyText}</td>
+                <td class="spotify-artist">${spotifyArtist}</td>
+                <td class="spotify-title">${spotifyTitle}</td>
                 <td class="score-cell">${scoreVal}</td>
                 <td class="status-cell">${statusLabel}</td>
                 <td><button class="edit-btn" onclick="openEditModal('${data.track_uid}')">Edit</button></td>
@@ -439,7 +451,14 @@
                     const row = document.getElementById(`row-${currentTrackUid}`);
                     if (row) {
                         row.className = "";
-                        row.querySelector('.spotify-title').innerText = `${data.result.spotify_artist} - ${data.result.spotify_title}`;
+                        
+                        // Update Cover
+                        row.cells[0].innerHTML = data.result.spotify_cover ? `<img src="${data.result.spotify_cover}" class="table-img">` : '';
+
+                        // Update Artist & Title
+                        row.querySelector('.spotify-artist').innerText = data.result.spotify_artist || '';
+                        row.querySelector('.spotify-title').innerText = data.result.spotify_title || '';
+                        
                         row.querySelector('.status-cell').innerText = "Success";
                         // Update score to 100% since it was manual
                         if (data.result.match_score) {
