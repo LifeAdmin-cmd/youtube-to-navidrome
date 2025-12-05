@@ -2,6 +2,7 @@ import base64
 import os
 import re
 import threading
+import time
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -20,11 +21,12 @@ class SpotifyClient:
         self.client_id = client_id or os.getenv("SPOTIFY_CLIENT_ID")
         self.client_secret = client_secret or os.getenv("SPOTIFY_CLIENT_SECRET")
         self._token = None
+        self._token_expiry = 0
         self._lock = threading.Lock()
 
     def _get_token(self) -> str:
         with self._lock:
-            if self._token:
+            if self._token and time.time() < self._token_expiry:
                 return self._token
 
             if not self.client_id or not self.client_secret:
@@ -42,6 +44,8 @@ class SpotifyClient:
             resp = requests.post(self.AUTH_URL, headers=headers, data=data, timeout=10)
             resp.raise_for_status()
             self._token = resp.json().get("access_token")
+            expires_in = data.get("expires_in", 3600)
+            self._token_expiry = time.time() + expires_in - 60
             return self._token
 
     def _get_headers(self) -> Dict[str, str]:
