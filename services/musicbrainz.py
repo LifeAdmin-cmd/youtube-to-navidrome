@@ -246,7 +246,8 @@ class MusicBrainzClient:
                 # 2. Fallback to TheAudioDB
                 if not meta["tags"].get("Album Cover Art") and artist_names:
                     cover_art = self._get_cover_from_theaudiodb(artist_names[0], title)
-                meta["tags"]["Album Cover Art"] = cover_art
+                if cover_art:
+                    meta["tags"]["Album Cover Art"] = cover_art
                 meta["score"] = best_score
                 result["best_match"] = meta
             except Exception as e:
