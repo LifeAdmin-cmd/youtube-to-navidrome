@@ -91,6 +91,14 @@ def get_candidates(track_uid):
     if not track:
         return jsonify({"error": "Track not found"}), 404
 
+    # --- NEU: Bilder bei Bedarf nachladen ---
+    # Wir greifen auf den MusicBrainz Client im Manager zu
+    # und aktualisieren die Kandidaten-Liste dieses Tracks.
+    if track.get("candidates"):
+        # Optional: Prüfen, ob das erste Bild schon da ist, um doppeltes Laden zu vermeiden
+        if track["candidates"][0].get("image") is None:
+            manager.mb_client.fetch_candidate_covers(track["candidates"])
+
     youtube_title = track["youtube_title"]
     uploader = track["video_info"].get("uploader")
     original_query = f"{youtube_title} - {uploader}" if uploader else youtube_title

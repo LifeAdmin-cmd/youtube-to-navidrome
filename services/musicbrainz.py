@@ -1,6 +1,7 @@
 import concurrent.futures
 import os
 import re
+import threading
 import time
 from typing import Any, Dict, List
 
@@ -20,7 +21,7 @@ class MusicBrainzClient:
     }
 
     def __init__(self):
-        pass
+        self._lock = threading.Lock()  # <--- NEU: Lock initialisieren
 
     def _get(self, endpoint: str, params: Dict[str, Any] = None) -> Dict[str, Any]:
         """Helper to make rate-limited requests to MusicBrainz."""
@@ -28,15 +29,20 @@ class MusicBrainzClient:
         if params:
             params["fmt"] = "json"
 
-        time.sleep(1.1)
+        # <--- NEU: 'with self._lock:' Block hinzufügen
+        # Dies zwingt alle Threads, nacheinander zu warten und anzufragen.
+        with self._lock:
+            time.sleep(1.1)
 
-        try:
-            resp = requests.get(url, headers=self.HEADERS, params=params, timeout=15)
-            resp.raise_for_status()
-            return resp.json()
-        except requests.RequestException as e:
-            print(f"[MusicBrainz] Request Error: {e}")
-            raise e
+            try:
+                resp = requests.get(
+                    url, headers=self.HEADERS, params=params, timeout=15
+                )
+                resp.raise_for_status()
+                return resp.json()
+            except requests.RequestException as e:
+                print(f"[MusicBrainz] Request Error: {e}")
+                raise e
 
     def _get_cover_from_theaudiodb(self, artist: str, title: str) -> str:
         """Fallback: Fetch cover art from TheAudioDB."""
@@ -158,11 +164,11 @@ class MusicBrainzClient:
             except Exception:
                 pass
 
-        # # 2. Fallback to TheAudioDB
-        # if artist and title and title != "Unknown":
-        #     # Taking the first artist usually works best for TheAudioDB
-        #     primary_artist = artist.split(",")[0].strip()
-        #     return self._get_cover_from_theaudiodb(artist=primary_artist, title=title)
+        # 2. Fallback to TheAudioDB
+        if artist and title and title != "Unknown":
+            # Taking the first artist usually works best for TheAudioDB
+            primary_artist = artist.split(",")[0].strip()
+            return self._get_cover_from_theaudiodb(artist=primary_artist, title=title)
 
         return None
 
@@ -206,27 +212,12 @@ class MusicBrainzClient:
                 "artist": a_names,
                 "album": album_name,
                 "release_id": rid,  # Stored for resolution
-                "image": None,
+                "image": None,  # <--- Bleibt vorerst leer!
                 "score": score,
             }
             candidates.append(candidate)
 
-        # 2. Resolve Images in Parallel (to avoid slow sequential HEAD checks)
-        # Using a ThreadPool to verify images for the top 10 candidates
-        if candidates:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-                # Map the resolve function to candidates
-                future_to_cand = {
-                    executor.submit(self._resolve_cover_art, c): c for c in candidates
-                }
-                for future in concurrent.futures.as_completed(future_to_cand):
-                    cand = future_to_cand[future]
-                    try:
-                        cand["image"] = future.result()
-                    except Exception as e:
-                        print(
-                            f"[MusicBrainz] Image resolution failed for {cand['title']}: {e}"
-                        )
+        # --- ENTFERNT: Der automatische Bilder-Download Block wurde hier gelöscht ---
 
         # 3. Sort and pick best
         candidates.sort(key=lambda x: x["score"], reverse=True)
@@ -240,6 +231,8 @@ class MusicBrainzClient:
 
         result = {"best_match": None, "candidates": candidates}
 
+        # Falls wir einen direkten Treffer für die Tabelle haben, holen wir hier immer noch
+        # die vollen Metadaten (inkl. Cover für diesen EINEN Treffer).
         if best_track and best_score > 0.4:
             print(
                 f"[MusicBrainz] Match: '{best_track['title']}' (Score: {best_score:.2f})"
@@ -249,16 +242,45 @@ class MusicBrainzClient:
                 meta = self.get_track_metadata(best_track["id"])
                 artist_names = meta["tags"].get("Artists", [])
                 title = meta["tags"].get("Title")
+
                 # 2. Fallback to TheAudioDB
-                if not meta["Album Cover Art"] and artist_names:
+                if not meta["tags"].get("Album Cover Art") and artist_names:
                     cover_art = self._get_cover_from_theaudiodb(artist_names[0], title)
-                meta["Album Cover Art"] = cover_art
+                meta["tags"]["Album Cover Art"] = cover_art
                 meta["score"] = best_score
                 result["best_match"] = meta
             except Exception as e:
                 print(f"[MusicBrainz] Failed to fetch metadata for best match: {e}")
 
         return result
+
+    def fetch_candidate_covers(
+        self, candidates: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """
+        Lädt die Cover-Bilder nachträglich.
+        Diese Methode wird erst aufgerufen, wenn der User den Edit-Dialog öffnet.
+        """
+        # Wir laden nur die Top 10, um Ressourcen zu sparen
+        subset = candidates[:10]
+
+        if subset:
+            print(
+                f"[MusicBrainz] Fetching covers for {len(subset)} candidates on demand..."
+            )
+            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+                future_to_cand = {
+                    executor.submit(self._resolve_cover_art, c): c for c in subset
+                }
+                for future in concurrent.futures.as_completed(future_to_cand):
+                    cand = future_to_cand[future]
+                    try:
+                        cand["image"] = future.result()
+                    except Exception as e:
+                        print(
+                            f"[MusicBrainz] Image resolution failed for {cand['title']}: {e}"
+                        )
+        return candidates
 
     def _execute_search(self, query: str) -> List[Dict[str, Any]]:
         data = self._get("recording", params={"query": query, "limit": 10})
