@@ -149,6 +149,7 @@ def rerun_search(track_uid):
     if not track_uid:
         return jsonify({"error": "Missing track_uid"}), 400
     try:
+        # Renamed variable locally to match new logic
         result = manager.rerun_spotify_search(track_uid, custom_query)
         return jsonify({"status": "ok", "result": result})
     except Exception as e:
