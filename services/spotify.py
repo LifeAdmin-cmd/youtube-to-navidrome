@@ -30,7 +30,7 @@ class SpotifyClient:
                 return self._token
 
             if not self.client_id or not self.client_secret:
-                raise ValueError("Spotify credentials missing.")
+                raise ValueError("Spotify credentials are missing.")
 
             auth_str = f"{self.client_id}:{self.client_secret}"
             auth_b64 = base64.b64encode(auth_str.encode()).decode()
