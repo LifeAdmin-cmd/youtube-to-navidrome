@@ -1,0 +1,55 @@
+name: Docker Build & Push
+
+on:
+  push:
+    branches: [ "main" ]    # Builds 'latest' on commits to main (optional)
+    tags: [ 'v*.*.*' ]      # Triggers release builds on tags like v1.0.1
+
+env:
+  # Replace with your Docker Hub username and repository name
+  # Based on your README, this seems to be the correct image name:
+  IMAGE_NAME: lifeadmin/youtube-to-navidrome
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 1. Set up Docker Buildx (required for multi-arch builds or caching)
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # 2. Login to Docker Hub
+      - name: Log into Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      # 3. Automatic Versioning Logic
+      # This extracts metadata from Git (branch names, tag names)
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          # Generates tags automatically:
+          # - type=semver: transforms "v1.0.1" tag -> "1.0.1", "1.0", "latest"
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      # 4. Build and Push
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Cache layers to speed up future builds
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
