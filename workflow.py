@@ -451,19 +451,21 @@ class WorkflowManager:
             vid_id, ["music_offtopic", "intro", "outro", "selfpromo", "interaction"]
         )
         good_segments = self.sponsorblock.invert_segments(duration, bad_segments)
-        final_file = raw_file
-        if not (
-            len(good_segments) == 1
-            and good_segments[0][0] == 0
-            and good_segments[0][1] == duration
-        ):
-            self.check_cancel()
-            cut_file = raw_file.with_name(f"{raw_file.stem}_cut.opus")
-            self.processor.cut_audio(raw_file, cut_file, good_segments)
-            raw_file.unlink()
-            cut_file.rename(raw_file)
-            final_file = raw_file
-        return final_file
+
+        self.check_cancel()
+
+        # Change: Always create a 'processed' file to apply normalization
+        processed_file = raw_file.with_name(f"{raw_file.stem}_processed.opus")
+
+        # If good_segments represents the whole file, it just normalizes.
+        # If it contains specific segments, it cuts AND normalizes.
+        self.processor.cut_audio(raw_file, processed_file, good_segments)
+
+        # Clean up the raw download and rename processed file
+        raw_file.unlink()
+        processed_file.rename(raw_file)
+
+        return raw_file
 
     def rerun_spotify_search(self, track_uid: str, custom_query: str = None) -> Dict:
         with self.state_lock:

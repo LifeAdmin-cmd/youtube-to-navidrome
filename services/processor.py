@@ -1,6 +1,5 @@
 import base64
 import os
-import shutil
 import sqlite3
 import subprocess
 from pathlib import Path
@@ -20,39 +19,44 @@ class AudioProcessor:
     def cut_audio(
         input_path: Path, output_path: Path, segments: List[Tuple[float, float]]
     ):
-        if not segments:
-            shutil.copy(input_path, output_path)
-            return
+        cmd = ["ffmpeg", "-y", "-i", str(input_path)]
 
-        filter_parts = []
-        input_labels = []
+        # Target -2dB True Peak using loudnorm
+        # I=-16 is a standard integrated loudness target for web/mobile
+        norm_filter = "loudnorm=I=-16:TP=-2:LRA=11"
 
-        for i, (start, end) in enumerate(segments):
-            label = f"a{i}"
-            filter_parts.append(
-                f"[0:a]atrim=start={start}:end={end},asetpts=PTS-STARTPTS[{label}]"
+        if segments:
+            filter_parts = []
+            input_labels = []
+            for i, (start, end) in enumerate(segments):
+                label = f"a{i}"
+                filter_parts.append(
+                    f"[0:a]atrim=start={start}:end={end},asetpts=PTS-STARTPTS[{label}]"
+                )
+                input_labels.append(f"[{label}]")
+
+            concat_cmd = (
+                f"{''.join(input_labels)}concat=n={len(input_labels)}:v=0:a=1[cuta]"
             )
-            input_labels.append(f"[{label}]")
+            # Chain the cut audio into loudnorm
+            full_filter = (
+                f"{';'.join(filter_parts)};{concat_cmd};[cuta]{norm_filter}[outa]"
+            )
+        else:
+            # Just normalize the original stream
+            full_filter = f"[0:a]{norm_filter}[outa]"
 
-        concat_cmd = (
-            f"{''.join(input_labels)}concat=n={len(input_labels)}:v=0:a=1[outa]"
+        cmd.extend(
+            [
+                "-filter_complex",
+                full_filter,
+                "-map",
+                "[outa]",
+                "-vn",
+                str(output_path),
+            ]
         )
-        full_filter = ";".join(filter_parts) + ";" + concat_cmd
 
-        cmd = [
-            "ffmpeg",
-            "-y",
-            "-i",
-            str(input_path),
-            "-filter_complex",
-            full_filter,
-            "-map",
-            "[outa]",
-            "-vn",
-            str(output_path),
-        ]
-
-        print(f"[FFmpeg] Processing {len(segments)} segments...")
         subprocess.run(
             cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT
         )
