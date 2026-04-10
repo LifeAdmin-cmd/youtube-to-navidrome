@@ -318,13 +318,11 @@
 
             const statusLabel = data.status.charAt(0).toUpperCase() + data.status.slice(1);
             
-            // BUGFIX: Diese Variablen müssen api_ heißen, weil sie oben definiert wurden
             const apiArtist = data.api_artist || '';
             const apiTitle = data.api_title || '';
             const coverImg = data.api_cover ? `<img src="${data.api_cover}" class="table-img">` : '';
             const scoreVal = (data.match_score !== undefined) ? Math.round(data.match_score * 100) + '%' : '';
 
-            // BUGFIX: Hier waren noch Reste von spotifyArtist/spotifyTitle drin, was zum JS Absturz führte
             tr.innerHTML = `
                 <td>${coverImg}</td>
                 <td>${data.youtube_title || 'Unknown'}</td>

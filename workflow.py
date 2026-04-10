@@ -93,7 +93,9 @@ class WorkflowManager:
             with state_path.open("r") as f:
                 data = json.load(f)
 
+            # Backwards compatibility if file was just tracks dict
             if "tracks" not in data and "logs" not in data and data:
+                # Assume old format (just tracks)
                 tracks_data = data
                 logs_data = []
             else:
@@ -109,17 +111,22 @@ class WorkflowManager:
             print(f"[System] Load error: {e}")
             return {"tracks": {}, "logs": []}
 
+    # --- Broadcasting System ---
+
     def _broadcast(self, message_data: Dict):
         """Sends a message to all active listeners and saves to log."""
         msg_str = json.dumps(message_data)
 
         with self.state_lock:
+            # Update internal state
             if "progress" in message_data:
                 self.current_progress = message_data["progress"]
 
+            # Add to history (only messages with text)
             if message_data.get("message"):
                 self.logs.append(message_data)
 
+        # Push to all active queues
         dead_listeners = []
         for q in self.listeners:
             try:
@@ -127,6 +134,7 @@ class WorkflowManager:
             except queue.Full:
                 dead_listeners.append(q)
 
+        # Cleanup full/dead queues
         for q in dead_listeners:
             if q in self.listeners:
                 self.listeners.remove(q)
@@ -136,6 +144,7 @@ class WorkflowManager:
         q = queue.Queue()
         self.listeners.append(q)
         try:
+            # Yield active state immediately so UI syncs up
             yield json.dumps(
                 {
                     "status": "info",
@@ -162,15 +171,17 @@ class WorkflowManager:
             }
 
     def start_processing(self, url: str):
+        """Starts the processing loop in a background thread."""
         if self.is_active:
             raise Exception("A task is already running.")
 
         self.cancel_event.clear()
         self.is_active = True
 
+        # --- CLEARS THE QUEUE ---
         with self.state_lock:
             self.logs = []
-            self.tracks = {}
+            self.tracks = {}  # Explicitly clear tracks from the previous run
             self._save_state()
 
         thread = threading.Thread(target=self._run_background_task, args=(url,))
@@ -178,6 +189,7 @@ class WorkflowManager:
         thread.start()
 
     def start_retry(self):
+        """Starts the retry loop in a background thread."""
         if self.is_active:
             raise Exception("A task is already running.")
 
@@ -188,6 +200,8 @@ class WorkflowManager:
         thread.daemon = True
         thread.start()
 
+    # --- Internal Background Tasks ---
+
     def _run_background_task(self, url: str):
         self._broadcast(
             {"status": "processing", "message": "Analyzing URL...", "progress": 0}
@@ -195,14 +209,25 @@ class WorkflowManager:
         executor = None
 
         try:
-            with ytdlp.YoutubeDL({"extract_flat": True, "quiet": True}) as ydl:
+            # FIX: Explicitly set noplaylist to False and use in_playlist
+            # to properly parse playlist URLs and mixed watch?v=&list= URLs.
+            ydl_opts = {
+                "extract_flat": "in_playlist",
+                "quiet": True,
+                "noplaylist": False,
+                "ignoreerrors": True,  # Ignores deleted/private videos in playlists
+            }
+            with ytdlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
 
-            entries = info.get("entries") if "entries" in info else [info]
-            entries = [e for e in entries if e]
-            total = len(entries)
+            if not info:
+                raise ValueError("Could not extract info from URL.")
 
+            # Identify if it is a playlist or single song
             if "entries" in info:
+                # Remove None entries (caused by ignoreerrors=True on deleted videos)
+                entries = [e for e in info["entries"] if e]
+                total = len(entries)
                 self._broadcast(
                     {
                         "status": "processing",
@@ -210,6 +235,9 @@ class WorkflowManager:
                         "progress": 0,
                     }
                 )
+            else:
+                entries = [info]
+                total = 1
 
             msg_queue = queue.Queue()
             executor = ThreadPoolExecutor(max_workers=self.MAX_WORKERS)
@@ -234,13 +262,16 @@ class WorkflowManager:
                 )
                 futures.append(future)
 
+            # Consumption Loop
             finished_count = 0
             while finished_count < len(futures):
                 if self.cancel_event.is_set():
                     raise OperationCancelled("Cancelled")
 
                 try:
+                    # Fetch from workers and broadcast
                     msg = msg_queue.get(timeout=0.5)
+                    # Parse to dict to pass to _broadcast
                     if isinstance(msg, str):
                         msg = json.loads(msg)
 
@@ -254,6 +285,7 @@ class WorkflowManager:
 
                 finished_count = sum(1 for f in futures if f.done())
 
+            # Flush
             while not msg_queue.empty():
                 msg = msg_queue.get()
                 if isinstance(msg, str):
@@ -538,11 +570,19 @@ class WorkflowManager:
         title = pre_info.get("title", "Unknown")
         try:
             if not pre_info.get("duration"):
-                with ytdlp.YoutubeDL({"quiet": True}) as ydl:
+                # FIX: Must set noplaylist=True here so we don't accidentally
+                # download metadata for an entire playlist for EVERY single video inside it!
+                ydl_opts = {"quiet": True, "noplaylist": True, "ignoreerrors": True}
+                with ytdlp.YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(url, download=False)
+
+                if not info:
+                    raise ValueError("Video unavailable or deleted.")
             else:
                 info = pre_info
+
             title = info.get("title", "Unknown")
+
             with self.state_lock:
                 self.tracks[track_uid] = {
                     "video_info": info,
@@ -563,6 +603,7 @@ class WorkflowManager:
                 }
             )
             yield from self._process_track_execution(track_uid, base_progress)
+
         except Exception as e:
             if isinstance(e, OperationCancelled):
                 raise e
@@ -645,7 +686,6 @@ class WorkflowManager:
                     self.tracks[track_uid]["status"] = "skipped"
                     self._save_state()
 
-                # HIER: yield außerhalb des Schreibschutz-Blocks
                 yield json.dumps(
                     {
                         "status": "skipped",
@@ -678,7 +718,6 @@ class WorkflowManager:
                 self.tracks[track_uid]["status"] = "success"
                 self._save_state()
 
-            # HIER: yield außerhalb des Schreibschutz-Blocks
             yield json.dumps(
                 {
                     "status": "success",
