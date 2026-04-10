@@ -1,3 +1,6 @@
+# testing files
+*.ipynb
+
 # downloaded music
 music_downloads/
 
