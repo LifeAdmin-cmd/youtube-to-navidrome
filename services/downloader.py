@@ -18,7 +18,9 @@ class Downloader:
         if self.cancel_event.is_set():
             raise OperationCancelled("Download aborted by user.")
 
-    def download_video(self, url: str, video_info: Dict[str, Any]) -> Path:
+    def download_video(
+        self, url: str, video_info: Dict[str, Any], cookie_path: str = None
+    ) -> Path:
         vid_id = video_info["id"]
         title_safe = Utils.sanitize_filename(video_info["title"])
 
@@ -29,7 +31,8 @@ class Downloader:
             "outtmpl": str(self.output_dir / "%(title)s [%(id)s].%(ext)s"),
             "noplaylist": True,
             "quiet": True,
-            "format": "bestaudio/best",
+            # ROBUST FALLBACK: Try bestaudio, if it fails, try the best combined stream
+            "format": "bestaudio/bestvideo+bestaudio/best",
             "overwrites": True,
             "progress_hooks": [self._progress_hook],
             "postprocessors": [
@@ -40,6 +43,9 @@ class Downloader:
                 }
             ],
         }
+
+        if cookie_path:
+            ydl_opts["cookiefile"] = cookie_path
 
         with ytdlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])

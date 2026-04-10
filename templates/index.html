@@ -71,6 +71,14 @@
         <label for="url">Paste YouTube URL:</label>
         <input type="text" id="url" placeholder="https://www.youtube.com/..." required>
         
+        <details style="margin-bottom: 15px;">
+            <summary style="cursor: pointer; font-size: 14px; color: #555; font-weight: bold;">
+                🔒 Advanced: Age-Restricted Video (Paste Cookies.txt)
+            </summary>
+            <textarea id="cookieText" rows="5" placeholder="# Netscape HTTP Cookie File&#10;.youtube.com    TRUE    /    TRUE    1750000000    LOGIN_INFO    AFmmF2..." style="width: 100%; margin-top: 10px; padding: 10px; border-radius: 6px; border: 1px solid #ccc; font-family: monospace; font-size: 12px; box-sizing: border-box;"></textarea>
+            <p style="font-size: 11px; color: #888; margin-top: 5px;">Cookies are saved in a secure temp file and instantly deleted after the job completes.</p>
+        </details>
+        
         <div class="btn-group">
             <button onclick="startProcess()" id="startBtn">Start Processing</button>
             <button onclick="cancelProcess()" id="cancelBtn" disabled>Cancel</button>
@@ -204,20 +212,21 @@
 
         function startProcess() {
             const url = document.getElementById('url').value;
+            const cookieText = document.getElementById('cookieText').value; // NEU
             if (!url) return alert("Please enter a URL");
             
-            // 1. Trigger Start via POST
             fetch('/start', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({url: url})
+                // NEU: cookie_text im Payload mitsenden
+                body: JSON.stringify({url: url, cookie_text: cookieText}) 
             })
             .then(res => res.json())
             .then(data => {
                 if (data.status === 'ok') {
-                    // Clear logs if you want fresh logs on new run (optional, backend cleared them)
                     document.getElementById('logContainer').innerHTML = "";
                     document.getElementById('resultsBody').innerHTML = ""; 
+                    document.getElementById('cookieText').value = ""; // Textfeld sofort nach dem Senden leeren
                     
                     document.getElementById('startBtn').disabled = true;
                     document.getElementById('cancelBtn').disabled = false;

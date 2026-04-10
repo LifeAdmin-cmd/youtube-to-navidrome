@@ -1,6 +1,8 @@
 import json
 import os
 import queue
+import re
+import tempfile
 import threading
 import time
 import uuid
@@ -26,7 +28,6 @@ class WorkflowManager:
         self.cancel_event = threading.Event()
         self.MAX_SEARCH_ATTEMPTS = 3
 
-        # --- Worker Count Logic ---
         system_cores = os.cpu_count() or 4
         env_workers = os.getenv("MAX_WORKERS")
         if env_workers:
@@ -38,18 +39,14 @@ class WorkflowManager:
             self.MAX_WORKERS = system_cores
         print(f"[System] Parallel workers set to: {self.MAX_WORKERS}")
 
-        # Thread safety
         self.state_lock = threading.RLock()
-
-        # --- NEW: Broadcasting & State ---
         self.listeners: List[queue.Queue] = []
         self.is_active = False
         self.current_progress = 0
+        self.current_cookie_path = None
 
-        # Ensure output directory exists before attempting to load state
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Load tracks AND logs
         loaded_state = self._load_state()
         self.tracks = loaded_state.get("tracks", {})
         self.logs = loaded_state.get("logs", [])
@@ -72,10 +69,9 @@ class WorkflowManager:
                     serializable_track["path"] = str(serializable_track["path"])
                 serializable_tracks[uid] = serializable_track
 
-            # Save complete state including logs
             full_state = {
                 "tracks": serializable_tracks,
-                "logs": self.logs[-500:],  # Keep last 500 logs to avoid huge files
+                "logs": self.logs[-500:],
             }
 
             try:
@@ -93,9 +89,7 @@ class WorkflowManager:
             with state_path.open("r") as f:
                 data = json.load(f)
 
-            # Backwards compatibility if file was just tracks dict
             if "tracks" not in data and "logs" not in data and data:
-                # Assume old format (just tracks)
                 tracks_data = data
                 logs_data = []
             else:
@@ -111,22 +105,15 @@ class WorkflowManager:
             print(f"[System] Load error: {e}")
             return {"tracks": {}, "logs": []}
 
-    # --- Broadcasting System ---
-
     def _broadcast(self, message_data: Dict):
-        """Sends a message to all active listeners and saves to log."""
         msg_str = json.dumps(message_data)
 
         with self.state_lock:
-            # Update internal state
             if "progress" in message_data:
                 self.current_progress = message_data["progress"]
-
-            # Add to history (only messages with text)
             if message_data.get("message"):
                 self.logs.append(message_data)
 
-        # Push to all active queues
         dead_listeners = []
         for q in self.listeners:
             try:
@@ -134,17 +121,14 @@ class WorkflowManager:
             except queue.Full:
                 dead_listeners.append(q)
 
-        # Cleanup full/dead queues
         for q in dead_listeners:
             if q in self.listeners:
                 self.listeners.remove(q)
 
     def subscribe(self) -> Iterator[str]:
-        """Yields events for a new client."""
         q = queue.Queue()
         self.listeners.append(q)
         try:
-            # Yield active state immediately so UI syncs up
             yield json.dumps(
                 {
                     "status": "info",
@@ -152,7 +136,6 @@ class WorkflowManager:
                     "progress": self.current_progress,
                 }
             )
-
             while True:
                 msg = q.get()
                 yield f"data: {msg}\n\n"
@@ -161,7 +144,6 @@ class WorkflowManager:
                 self.listeners.remove(q)
 
     def get_full_state(self):
-        """Returns the complete data needed to restore the UI."""
         with self.state_lock:
             return {
                 "tracks": self.tracks,
@@ -170,18 +152,43 @@ class WorkflowManager:
                 "current_progress": self.current_progress,
             }
 
-    def start_processing(self, url: str):
-        """Starts the processing loop in a background thread."""
+    def start_processing(self, url: str, cookie_text: str = None):
         if self.is_active:
             raise Exception("A task is already running.")
 
         self.cancel_event.clear()
         self.is_active = True
+        self.current_cookie_path = None
 
-        # --- CLEARS THE QUEUE ---
+        if cookie_text and cookie_text.strip():
+            cleaned_lines = [
+                "# Netscape HTTP Cookie File",
+                "# Auto-healed by YT-to-Navidrome",
+                "",
+            ]
+
+            for line in cookie_text.splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+
+                parts = re.split(r"[ \t\xA0]+", line, maxsplit=6)
+                if len(parts) == 7:
+                    cleaned_lines.append("\t".join(parts))
+                else:
+                    cleaned_lines.append(line)
+
+            cleaned_cookie = "\n".join(cleaned_lines)
+
+            # Securely save the healed cookie
+            fd, path = tempfile.mkstemp(suffix=".txt", text=True)
+            with os.fdopen(fd, "w") as f:
+                f.write(cleaned_cookie)
+            self.current_cookie_path = path
+
         with self.state_lock:
             self.logs = []
-            self.tracks = {}  # Explicitly clear tracks from the previous run
+            self.tracks = {}
             self._save_state()
 
         thread = threading.Thread(target=self._run_background_task, args=(url,))
@@ -189,7 +196,6 @@ class WorkflowManager:
         thread.start()
 
     def start_retry(self):
-        """Starts the retry loop in a background thread."""
         if self.is_active:
             raise Exception("A task is already running.")
 
@@ -200,8 +206,6 @@ class WorkflowManager:
         thread.daemon = True
         thread.start()
 
-    # --- Internal Background Tasks ---
-
     def _run_background_task(self, url: str):
         self._broadcast(
             {"status": "processing", "message": "Analyzing URL...", "progress": 0}
@@ -209,23 +213,23 @@ class WorkflowManager:
         executor = None
 
         try:
-            # FIX: Explicitly set noplaylist to False and use in_playlist
-            # to properly parse playlist URLs and mixed watch?v=&list= URLs.
             ydl_opts = {
                 "extract_flat": "in_playlist",
                 "quiet": True,
                 "noplaylist": False,
-                "ignoreerrors": True,  # Ignores deleted/private videos in playlists
+                "ignoreerrors": True,
             }
+
+            if getattr(self, "current_cookie_path", None):
+                ydl_opts["cookiefile"] = self.current_cookie_path
+
             with ytdlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
 
             if not info:
                 raise ValueError("Could not extract info from URL.")
 
-            # Identify if it is a playlist or single song
             if "entries" in info:
-                # Remove None entries (caused by ignoreerrors=True on deleted videos)
                 entries = [e for e in info["entries"] if e]
                 total = len(entries)
                 self._broadcast(
@@ -262,16 +266,13 @@ class WorkflowManager:
                 )
                 futures.append(future)
 
-            # Consumption Loop
             finished_count = 0
             while finished_count < len(futures):
                 if self.cancel_event.is_set():
                     raise OperationCancelled("Cancelled")
 
                 try:
-                    # Fetch from workers and broadcast
                     msg = msg_queue.get(timeout=0.5)
-                    # Parse to dict to pass to _broadcast
                     if isinstance(msg, str):
                         msg = json.loads(msg)
 
@@ -285,7 +286,6 @@ class WorkflowManager:
 
                 finished_count = sum(1 for f in futures if f.done())
 
-            # Flush
             while not msg_queue.empty():
                 msg = msg_queue.get()
                 if isinstance(msg, str):
@@ -318,6 +318,16 @@ class WorkflowManager:
         finally:
             if executor:
                 executor.shutdown(wait=True)
+
+            if getattr(self, "current_cookie_path", None) and os.path.exists(
+                self.current_cookie_path
+            ):
+                try:
+                    os.unlink(self.current_cookie_path)
+                except Exception as e:
+                    print(f"[System] Failed to delete temp cookie file: {e}")
+            self.current_cookie_path = None
+
             self.is_active = False
             self._save_state()
 
@@ -456,7 +466,9 @@ class WorkflowManager:
         return count
 
     def _download_and_process(self, url: str, info: Dict) -> Path:
-        raw_file = self.downloader.download_video(url, info)
+        cookie_path = getattr(self, "current_cookie_path", None)
+        raw_file = self.downloader.download_video(url, info, cookie_path)
+
         vid_id = info["id"]
         duration = info["duration"]
         bad_segments = self.sponsorblock.get_segments(
@@ -570,9 +582,10 @@ class WorkflowManager:
         title = pre_info.get("title", "Unknown")
         try:
             if not pre_info.get("duration"):
-                # FIX: Must set noplaylist=True here so we don't accidentally
-                # download metadata for an entire playlist for EVERY single video inside it!
                 ydl_opts = {"quiet": True, "noplaylist": True, "ignoreerrors": True}
+                if getattr(self, "current_cookie_path", None):
+                    ydl_opts["cookiefile"] = self.current_cookie_path
+
                 with ytdlp.YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(url, download=False)
 
@@ -685,20 +698,19 @@ class WorkflowManager:
                 with self.state_lock:
                     self.tracks[track_uid]["status"] = "skipped"
                     self._save_state()
-
-                yield json.dumps(
-                    {
-                        "status": "skipped",
-                        "message": f"Skipped: {tags['Title']} exists.",
-                        "progress": base_progress,
-                        "track_uid": track_uid,
-                        "youtube_title": title,
-                        "api_title": tags["Title"],
-                        "api_artist": tags["Artist"],
-                        "api_cover": tags.get("Album Cover Art"),
-                        "match_score": match_score,
-                    }
-                )
+                    yield json.dumps(
+                        {
+                            "status": "skipped",
+                            "message": f"Skipped: {tags['Title']} exists.",
+                            "progress": base_progress,
+                            "track_uid": track_uid,
+                            "youtube_title": title,
+                            "api_title": tags["Title"],
+                            "api_artist": tags["Artist"],
+                            "api_cover": tags.get("Album Cover Art"),
+                            "match_score": match_score,
+                        }
+                    )
                 return
 
             yield json.dumps(
@@ -717,20 +729,19 @@ class WorkflowManager:
                 self.tracks[track_uid]["path"] = final_file
                 self.tracks[track_uid]["status"] = "success"
                 self._save_state()
-
-            yield json.dumps(
-                {
-                    "status": "success",
-                    "message": f"Saved: {final_file.name}",
-                    "track_uid": track_uid,
-                    "youtube_title": title,
-                    "api_title": tags["Title"],
-                    "api_artist": tags["Artist"],
-                    "api_cover": tags.get("Album Cover Art"),
-                    "match_score": match_score,
-                    "progress": base_progress,
-                }
-            )
+                yield json.dumps(
+                    {
+                        "status": "success",
+                        "message": f"Saved: {final_file.name}",
+                        "track_uid": track_uid,
+                        "youtube_title": title,
+                        "api_title": tags["Title"],
+                        "api_artist": tags["Artist"],
+                        "api_cover": tags.get("Album Cover Art"),
+                        "match_score": match_score,
+                        "progress": base_progress,
+                    }
+                )
 
         except Exception as e:
             if isinstance(e, OperationCancelled):

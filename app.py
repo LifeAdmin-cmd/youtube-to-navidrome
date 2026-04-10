@@ -49,11 +49,13 @@ def start_process():
     """Starts the download workflow in the background."""
     data = request.json
     youtube_url = data.get("url")
+    cookie_text = data.get("cookie_text")  # NEU
+
     if not youtube_url:
         return jsonify({"status": "error", "message": "No URL provided"}), 400
 
     try:
-        manager.start_processing(youtube_url)
+        manager.start_processing(youtube_url, cookie_text)  # Parameter übergeben
         return jsonify({"status": "ok", "message": "Started"})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 400
