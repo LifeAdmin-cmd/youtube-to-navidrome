@@ -93,9 +93,7 @@ class WorkflowManager:
             with state_path.open("r") as f:
                 data = json.load(f)
 
-            # Backwards compatibility if file was just tracks dict
             if "tracks" not in data and "logs" not in data and data:
-                # Assume old format (just tracks)
                 tracks_data = data
                 logs_data = []
             else:
@@ -111,24 +109,17 @@ class WorkflowManager:
             print(f"[System] Load error: {e}")
             return {"tracks": {}, "logs": []}
 
-    # --- NEW: Broadcasting System ---
-
     def _broadcast(self, message_data: Dict):
         """Sends a message to all active listeners and saves to log."""
         msg_str = json.dumps(message_data)
 
         with self.state_lock:
-            # Update internal state
             if "progress" in message_data:
                 self.current_progress = message_data["progress"]
 
-            # Add to history (only messages with text)
             if message_data.get("message"):
-                # Add timestamp/style if needed, or just store the raw dict
                 self.logs.append(message_data)
-                # Auto-save occasionally? For now, we save on specific events or exit.
 
-        # Push to all active queues
         dead_listeners = []
         for q in self.listeners:
             try:
@@ -136,7 +127,6 @@ class WorkflowManager:
             except queue.Full:
                 dead_listeners.append(q)
 
-        # Cleanup full/dead queues
         for q in dead_listeners:
             if q in self.listeners:
                 self.listeners.remove(q)
@@ -146,7 +136,6 @@ class WorkflowManager:
         q = queue.Queue()
         self.listeners.append(q)
         try:
-            # Yield active state immediately so UI syncs up
             yield json.dumps(
                 {
                     "status": "info",
@@ -166,24 +155,22 @@ class WorkflowManager:
         """Returns the complete data needed to restore the UI."""
         with self.state_lock:
             return {
-                "tracks": self.tracks,  # Flask jsonify handles dicts
+                "tracks": self.tracks,
                 "logs": self.logs,
                 "is_active": self.is_active,
                 "current_progress": self.current_progress,
             }
 
     def start_processing(self, url: str):
-        """Starts the processing loop in a background thread."""
         if self.is_active:
             raise Exception("A task is already running.")
 
         self.cancel_event.clear()
         self.is_active = True
 
-        # --- CLEARS THE QUEUE ---
         with self.state_lock:
             self.logs = []
-            self.tracks = {}  # Explicitly clear tracks from the previous run
+            self.tracks = {}
             self._save_state()
 
         thread = threading.Thread(target=self._run_background_task, args=(url,))
@@ -191,7 +178,6 @@ class WorkflowManager:
         thread.start()
 
     def start_retry(self):
-        """Starts the retry loop in a background thread."""
         if self.is_active:
             raise Exception("A task is already running.")
 
@@ -201,8 +187,6 @@ class WorkflowManager:
         thread = threading.Thread(target=self._run_retry_task)
         thread.daemon = True
         thread.start()
-
-    # --- Internal Background Tasks ---
 
     def _run_background_task(self, url: str):
         self._broadcast(
@@ -250,16 +234,13 @@ class WorkflowManager:
                 )
                 futures.append(future)
 
-            # Consumption Loop
             finished_count = 0
             while finished_count < len(futures):
                 if self.cancel_event.is_set():
                     raise OperationCancelled("Cancelled")
 
                 try:
-                    # Fetch from workers and broadcast
                     msg = msg_queue.get(timeout=0.5)
-                    # Parse to dict to pass to _broadcast
                     if isinstance(msg, str):
                         msg = json.loads(msg)
 
@@ -273,7 +254,6 @@ class WorkflowManager:
 
                 finished_count = sum(1 for f in futures if f.done())
 
-            # Flush
             while not msg_queue.empty():
                 msg = msg_queue.get()
                 if isinstance(msg, str):
@@ -454,14 +434,9 @@ class WorkflowManager:
 
         self.check_cancel()
 
-        # Change: Always create a 'processed' file to apply normalization
         processed_file = raw_file.with_name(f"{raw_file.stem}_processed.opus")
-
-        # If good_segments represents the whole file, it just normalizes.
-        # If it contains specific segments, it cuts AND normalizes.
         self.processor.cut_audio(raw_file, processed_file, good_segments)
 
-        # Clean up the raw download and rename processed file
         raw_file.unlink()
         processed_file.rename(raw_file)
 
@@ -500,7 +475,6 @@ class WorkflowManager:
 
         self.cancel_event.clear()
 
-        # Hole die Tags direkt aus dem gespeicherten Kandidaten! Kein weiterer API Request nötig.
         candidate = next(
             (c for c in track_data.get("candidates", []) if c["id"] == music_id), None
         )
@@ -528,7 +502,7 @@ class WorkflowManager:
             self.tracks[track_uid]["path"] = new_path
             self.tracks[track_uid]["status"] = "success"
             self.tracks[track_uid]["best_match_tags"] = tags
-            self.tracks[track_uid]["match_score"] = 1.0  # Manual selection = 100%
+            self.tracks[track_uid]["match_score"] = 1.0
             self._save_state()
 
         return {
@@ -624,7 +598,6 @@ class WorkflowManager:
             for attempt in range(1, self.MAX_SEARCH_ATTEMPTS + 1):
                 self.check_cancel()
                 try:
-                    # Hier anpassen:
                     search_res = self.ytmusic.search_tracks(
                         title, uploader, attempt=attempt
                     )
@@ -671,19 +644,21 @@ class WorkflowManager:
                 with self.state_lock:
                     self.tracks[track_uid]["status"] = "skipped"
                     self._save_state()
-                    yield json.dumps(
-                        {
-                            "status": "skipped",
-                            "message": f"Skipped: {tags['Title']} exists.",
-                            "progress": base_progress,
-                            "track_uid": track_uid,
-                            "youtube_title": title,
-                            "api_title": tags["Title"],
-                            "api_artist": tags["Artist"],
-                            "api_cover": tags.get("Album Cover Art"),
-                            "match_score": match_score,
-                        }
-                    )
+
+                # HIER: yield außerhalb des Schreibschutz-Blocks
+                yield json.dumps(
+                    {
+                        "status": "skipped",
+                        "message": f"Skipped: {tags['Title']} exists.",
+                        "progress": base_progress,
+                        "track_uid": track_uid,
+                        "youtube_title": title,
+                        "api_title": tags["Title"],
+                        "api_artist": tags["Artist"],
+                        "api_cover": tags.get("Album Cover Art"),
+                        "match_score": match_score,
+                    }
+                )
                 return
 
             yield json.dumps(
@@ -693,26 +668,30 @@ class WorkflowManager:
                     "progress": base_progress,
                 }
             )
+
             self.check_cancel()
             final_file = self._download_and_process(url, info)
             final_file = self.processor.tag_audio(final_file, tags)
+
             with self.state_lock:
                 self.tracks[track_uid]["path"] = final_file
                 self.tracks[track_uid]["status"] = "success"
                 self._save_state()
-                yield json.dumps(
-                    {
-                        "status": "success",
-                        "message": f"Saved: {final_file.name}",
-                        "track_uid": track_uid,
-                        "youtube_title": title,
-                        "api_title": tags["Title"],
-                        "api_artist": tags["Artist"],
-                        "api_cover": tags.get("Album Cover Art"),
-                        "match_score": match_score,
-                        "progress": base_progress,
-                    }
-                )
+
+            # HIER: yield außerhalb des Schreibschutz-Blocks
+            yield json.dumps(
+                {
+                    "status": "success",
+                    "message": f"Saved: {final_file.name}",
+                    "track_uid": track_uid,
+                    "youtube_title": title,
+                    "api_title": tags["Title"],
+                    "api_artist": tags["Artist"],
+                    "api_cover": tags.get("Album Cover Art"),
+                    "match_score": match_score,
+                    "progress": base_progress,
+                }
+            )
 
         except Exception as e:
             if isinstance(e, OperationCancelled):
