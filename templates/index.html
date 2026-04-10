@@ -164,13 +164,13 @@
                         // Populate Table
                         tracks.forEach(track => {
                              const rowData = {
-                                 track_uid: track.track_uid,
-                                 youtube_title: track.youtube_title,
-                                 spotify_title: track.best_match_tags ? track.best_match_tags.Title : null,
-                                 spotify_artist: track.best_match_tags ? track.best_match_tags.Artist : null,
-                                 spotify_cover: track.best_match_tags ? track.best_match_tags["Album Cover Art"] : null,
-                                 match_score: track.match_score,
-                                 status: track.status
+                                track_uid: track.track_uid,
+                                youtube_title: track.youtube_title,
+                                api_title: track.best_match_tags ? track.best_match_tags.Title : null,
+                                api_artist: track.best_match_tags ? track.best_match_tags.Artist : null,
+                                api_cover: track.best_match_tags ? track.best_match_tags["Album Cover Art"] : null,
+                                match_score: track.match_score,
+                                status: track.status
                              };
                              addResultRow(rowData);
                         });
@@ -318,9 +318,9 @@
             else if (data.status === 'error') tr.className = 'row-error';
 
             const statusLabel = data.status.charAt(0).toUpperCase() + data.status.slice(1);
-            const spotifyArtist = data.spotify_artist || '';
-            const spotifyTitle = data.spotify_title || '';
-            const coverImg = data.spotify_cover ? `<img src="${data.spotify_cover}" class="table-img">` : '';
+            const apiArtist = data.api_artist || '';
+            const apiTitle = data.api_title || '';
+            const coverImg = data.api_cover ? `<img src="${data.api_cover}" class="table-img">` : '';
             const scoreVal = (data.match_score !== undefined) ? Math.round(data.match_score * 100) + '%' : '';
 
             tr.innerHTML = `
@@ -434,7 +434,7 @@
             document.getElementById('rerunSearchModal').style.display = "none";
         }
 
-        function selectCandidate(spotifyId) {
+        function selectCandidate(musicId) {
             if(!confirm("Process file with this metadata?")) return;
             document.getElementById('candidateList').innerHTML = "<p>Processing... Please wait.</p>";
             const rerunList = document.getElementById('rerunCandidateList');
@@ -443,7 +443,8 @@
             fetch('/api/update_tag', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ track_uid: currentTrackUid, spotify_id: spotifyId })
+                // GEÄNDERT von spotify_id zu music_id
+                body: JSON.stringify({ track_uid: currentTrackUid, music_id: musicId })
             })
             .then(res => res.json())
             .then(data => {
@@ -452,12 +453,10 @@
                     if (row) {
                         row.className = "";
                         
-                        // Update Cover
-                        row.cells[0].innerHTML = data.result.spotify_cover ? `<img src="${data.result.spotify_cover}" class="table-img">` : '';
-
-                        // Update Artist & Title
-                        row.querySelector('.spotify-artist').innerText = data.result.spotify_artist || '';
-                        row.querySelector('.spotify-title').innerText = data.result.spotify_title || '';
+                        // GEÄNDERT zu data.result.api_cover etc.
+                        row.cells[0].innerHTML = data.result.api_cover ? `<img src="${data.result.api_cover}" class="table-img">` : '';
+                        row.querySelector('.api-artist').innerText = data.result.api_artist || '';
+                        row.querySelector('.api-title').innerText = data.result.api_title || '';
                         
                         row.querySelector('.status-cell').innerText = "Success";
                         // Update score to 100% since it was manual

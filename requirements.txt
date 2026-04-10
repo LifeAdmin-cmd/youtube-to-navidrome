@@ -1,6 +1,7 @@
 yt-dlp
-ffmpeg
+ffmpeg-python
 requests
 mutagen
 python-dotenv
 flask
+ytmusicapi

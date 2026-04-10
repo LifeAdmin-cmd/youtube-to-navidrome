@@ -13,7 +13,7 @@ import yt_dlp as ytdlp
 from services.downloader import Downloader
 from services.processor import AudioProcessor
 from services.sponsorblock import SponsorBlockClient
-from services.spotify import SpotifyClient
+from services.ytmusic import YTMusicClient
 from utils import OperationCancelled
 
 
@@ -54,7 +54,7 @@ class WorkflowManager:
         self.tracks = loaded_state.get("tracks", {})
         self.logs = loaded_state.get("logs", [])
 
-        self.spotify = SpotifyClient()
+        self.ytmusic = YTMusicClient()
         self.sponsorblock = SponsorBlockClient()
         self.downloader = Downloader(self.output_dir, self.cancel_event)
         self.processor = AudioProcessor()
@@ -467,13 +467,15 @@ class WorkflowManager:
 
         return raw_file
 
-    def rerun_spotify_search(self, track_uid: str, custom_query: str = None) -> Dict:
+    def rerun_music_search(self, track_uid: str, custom_query: str = None) -> Dict:
         with self.state_lock:
             if track_uid not in self.tracks:
                 raise ValueError("Track not found.")
             track = self.tracks[track_uid]
+
         self.cancel_event.clear()
         search_title = track["youtube_title"]
+
         if custom_query:
             query_to_use = custom_query
             query_display = custom_query
@@ -481,26 +483,39 @@ class WorkflowManager:
             uploader = track["video_info"].get("uploader")
             query_to_use = f"{search_title} - {uploader}" if uploader else search_title
             query_display = query_to_use
-        search_res = self.spotify.search_raw(query_to_use, original_title=search_title)
+
+        search_res = self.ytmusic.search_raw(query_to_use, original_title=search_title)
+
         with self.state_lock:
             self.tracks[track_uid]["candidates"] = search_res["candidates"]
             self._save_state()
+
         return {"query_used": query_display, "candidates": search_res["candidates"]}
 
-    def update_track_tags(self, track_uid: str, spotify_id: str) -> Dict:
+    def update_track_tags(self, track_uid: str, music_id: str) -> Dict:
         with self.state_lock:
             if track_uid not in self.tracks:
                 raise ValueError("Track not found.")
             track_data = self.tracks[track_uid]
+
         self.cancel_event.clear()
-        new_meta = self.spotify.get_track_metadata(spotify_id)
-        tags = new_meta["tags"]
+
+        # Hole die Tags direkt aus dem gespeicherten Kandidaten! Kein weiterer API Request nötig.
+        candidate = next(
+            (c for c in track_data.get("candidates", []) if c["id"] == music_id), None
+        )
+        if not candidate:
+            raise ValueError("Candidate metadata not found. Please refresh search.")
+
+        tags = candidate["tags"]
+
         if self.processor.check_duplicate(
             tags["Title"], tags["Artist"], tags.get("Album", "")
         ):
             raise ValueError(
                 f"Track '{tags['Title']} - {tags['Artist']}' already exists."
             )
+
         if track_data.get("path") and track_data["path"].exists():
             new_path = self.processor.tag_audio(track_data["path"], tags)
         else:
@@ -508,17 +523,19 @@ class WorkflowManager:
                 track_data["url"], track_data["video_info"]
             )
             new_path = self.processor.tag_audio(untagged_file, tags)
+
         with self.state_lock:
             self.tracks[track_uid]["path"] = new_path
             self.tracks[track_uid]["status"] = "success"
             self.tracks[track_uid]["best_match_tags"] = tags
             self.tracks[track_uid]["match_score"] = 1.0  # Manual selection = 100%
             self._save_state()
+
         return {
             "new_filename": new_path.name,
-            "spotify_title": tags["Title"],
-            "spotify_artist": tags["Artist"],
-            "spotify_cover": tags.get("Album Cover Art"),
+            "api_title": tags["Title"],
+            "api_artist": tags["Artist"],
+            "api_cover": tags.get("Album Cover Art"),
             "match_score": 1.0,
         }
 
@@ -600,27 +617,26 @@ class WorkflowManager:
         url = track["url"]
         info = track["video_info"]
         try:
-            spotify_result = None
-            candidates = []
+            music_result = None
             tags = None
             match_score = 0.0
             last_error = None
             for attempt in range(1, self.MAX_SEARCH_ATTEMPTS + 1):
                 self.check_cancel()
                 try:
-                    search_res = self.spotify.search_tracks(
+                    # Hier anpassen:
+                    search_res = self.ytmusic.search_tracks(
                         title, uploader, attempt=attempt
                     )
                     if search_res["best_match"]:
-                        spotify_result = search_res["best_match"]
-                        tags = spotify_result["tags"]
-                        # The modified Spotify client returns the score in the metadata
-                        match_score = spotify_result.get("score", 0.0)
+                        music_result = search_res["best_match"]
+                        tags = music_result["tags"]
+                        match_score = music_result.get("score", 0.0)
                         candidates = search_res["candidates"]
                         break
                     candidates = search_res["candidates"]
                 except Exception as e:
-                    last_error = f"Spotify Error: {str(e)}"
+                    last_error = f"YTMusic Error: {str(e)}"
                     yield json.dumps(
                         {
                             "status": "warning",
@@ -634,7 +650,7 @@ class WorkflowManager:
                 self.tracks[track_uid]["best_match_tags"] = tags
                 self.tracks[track_uid]["match_score"] = match_score
 
-            if not spotify_result:
+            if not music_result:
                 with self.state_lock:
                     self.tracks[track_uid]["status"] = "error"
                     self._save_state()
@@ -655,19 +671,19 @@ class WorkflowManager:
                 with self.state_lock:
                     self.tracks[track_uid]["status"] = "skipped"
                     self._save_state()
-                yield json.dumps(
-                    {
-                        "status": "skipped",
-                        "message": f"Skipped: {tags['Title']} exists.",
-                        "progress": base_progress,
-                        "track_uid": track_uid,
-                        "youtube_title": title,
-                        "spotify_title": tags["Title"],
-                        "spotify_artist": tags["Artist"],
-                        "spotify_cover": tags.get("Album Cover Art"),
-                        "match_score": match_score,
-                    }
-                )
+                    yield json.dumps(
+                        {
+                            "status": "skipped",
+                            "message": f"Skipped: {tags['Title']} exists.",
+                            "progress": base_progress,
+                            "track_uid": track_uid,
+                            "youtube_title": title,
+                            "api_title": tags["Title"],
+                            "api_artist": tags["Artist"],
+                            "api_cover": tags.get("Album Cover Art"),
+                            "match_score": match_score,
+                        }
+                    )
                 return
 
             yield json.dumps(
@@ -684,19 +700,19 @@ class WorkflowManager:
                 self.tracks[track_uid]["path"] = final_file
                 self.tracks[track_uid]["status"] = "success"
                 self._save_state()
-            yield json.dumps(
-                {
-                    "status": "success",
-                    "message": f"Saved: {final_file.name}",
-                    "track_uid": track_uid,
-                    "youtube_title": title,
-                    "spotify_title": tags["Title"],
-                    "spotify_artist": tags["Artist"],
-                    "spotify_cover": tags.get("Album Cover Art"),
-                    "match_score": match_score,
-                    "progress": base_progress,
-                }
-            )
+                yield json.dumps(
+                    {
+                        "status": "success",
+                        "message": f"Saved: {final_file.name}",
+                        "track_uid": track_uid,
+                        "youtube_title": title,
+                        "api_title": tags["Title"],
+                        "api_artist": tags["Artist"],
+                        "api_cover": tags.get("Album Cover Art"),
+                        "match_score": match_score,
+                        "progress": base_progress,
+                    }
+                )
 
         except Exception as e:
             if isinstance(e, OperationCancelled):
