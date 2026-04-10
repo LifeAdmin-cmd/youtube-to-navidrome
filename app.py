@@ -108,13 +108,13 @@ def get_candidates(track_uid):
 def update_tag():
     data = request.json
     track_uid = data.get("track_uid")
-    spotify_id = data.get("spotify_id")
+    music_id = data.get("music_id")
 
-    if not track_uid or not spotify_id:
+    if not track_uid or not music_id:
         return jsonify({"error": "Missing parameters"}), 400
 
     try:
-        result = manager.update_track_tags(track_uid, spotify_id)
+        result = manager.update_track_tags(track_uid, music_id)
         return jsonify({"status": "ok", "result": result})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -149,7 +149,7 @@ def rerun_search(track_uid):
     if not track_uid:
         return jsonify({"error": "Missing track_uid"}), 400
     try:
-        result = manager.rerun_spotify_search(track_uid, custom_query)
+        result = manager.rerun_music_search(track_uid, custom_query)
         return jsonify({"status": "ok", "result": result})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500

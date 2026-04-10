@@ -38,13 +38,12 @@
         .edit-btn:hover { background-color: #0056b3; }
         
         .row-skipped { background-color: #fffcf0; color: #856404; }
-        /* Error row style (Red background) */
         .row-error { background-color: #ffe6e6; color: #a00; }
 
         /* New Style for Album Art in Table */
         .table-img { width: 50px; height: 50px; object-fit: cover; border-radius: 4px; display: block; }
-        .spotify-artist { color: #555; font-weight: 500; }
-        .spotify-title { color: #000; font-weight: 600; }
+        .api-artist { color: #555; font-weight: 500; }
+        .api-title { color: #000; font-weight: 600; }
 
         /* Modal Styles */
         .modal { display: none; position: fixed; z-index: 1; left: 0; top: 0; width: 100%; height: 100%; overflow: auto; background-color: rgba(0,0,0,0.5); }
@@ -123,7 +122,7 @@
     <div id="rerunSearchModal" class="modal">
         <div class="modal-content">
             <span class="close" onclick="closeRerunSearchModal()">×</span>
-            <h3>Rerun Spotify Search</h3>
+            <h3>Rerun API Search</h3>
             <p>Track: <span id="rerunTrackTitle" style="font-weight: bold;"></span></p>
             <p>Enter a custom search query or leave blank to use the original query: 
                <span id="originalQueryHint" style="font-style: italic; color: #666;"></span>
@@ -164,13 +163,13 @@
                         // Populate Table
                         tracks.forEach(track => {
                              const rowData = {
-                                 track_uid: track.track_uid,
-                                 youtube_title: track.youtube_title,
-                                 spotify_title: track.best_match_tags ? track.best_match_tags.Title : null,
-                                 spotify_artist: track.best_match_tags ? track.best_match_tags.Artist : null,
-                                 spotify_cover: track.best_match_tags ? track.best_match_tags["Album Cover Art"] : null,
-                                 match_score: track.match_score,
-                                 status: track.status
+                                track_uid: track.track_uid,
+                                youtube_title: track.youtube_title,
+                                api_title: track.best_match_tags ? track.best_match_tags.Title : null,
+                                api_artist: track.best_match_tags ? track.best_match_tags.Artist : null,
+                                api_cover: track.best_match_tags ? track.best_match_tags["Album Cover Art"] : null,
+                                match_score: track.match_score,
+                                status: track.status
                              };
                              addResultRow(rowData);
                         });
@@ -318,16 +317,17 @@
             else if (data.status === 'error') tr.className = 'row-error';
 
             const statusLabel = data.status.charAt(0).toUpperCase() + data.status.slice(1);
-            const spotifyArtist = data.spotify_artist || '';
-            const spotifyTitle = data.spotify_title || '';
-            const coverImg = data.spotify_cover ? `<img src="${data.spotify_cover}" class="table-img">` : '';
+            
+            const apiArtist = data.api_artist || '';
+            const apiTitle = data.api_title || '';
+            const coverImg = data.api_cover ? `<img src="${data.api_cover}" class="table-img">` : '';
             const scoreVal = (data.match_score !== undefined) ? Math.round(data.match_score * 100) + '%' : '';
 
             tr.innerHTML = `
                 <td>${coverImg}</td>
                 <td>${data.youtube_title || 'Unknown'}</td>
-                <td class="spotify-artist">${spotifyArtist}</td>
-                <td class="spotify-title">${spotifyTitle}</td>
+                <td class="api-artist">${apiArtist}</td>
+                <td class="api-title">${apiTitle}</td>
                 <td class="score-cell">${scoreVal}</td>
                 <td class="status-cell">${statusLabel}</td>
                 <td><button class="edit-btn" onclick="openEditModal('${data.track_uid}')">Edit</button></td>
@@ -401,7 +401,7 @@
             if (!uid) return;
             
             document.getElementById('rerunSearchBtn').disabled = true;
-            document.getElementById('rerunCandidateList').innerHTML = "<p>Searching Spotify...</p>";
+            document.getElementById('rerunCandidateList').innerHTML = "<p>Searching YTMusic...</p>";
 
             fetch(`/api/rerun_search/${uid}`, {
                 method: 'POST',
@@ -434,7 +434,7 @@
             document.getElementById('rerunSearchModal').style.display = "none";
         }
 
-        function selectCandidate(spotifyId) {
+        function selectCandidate(musicId) {
             if(!confirm("Process file with this metadata?")) return;
             document.getElementById('candidateList').innerHTML = "<p>Processing... Please wait.</p>";
             const rerunList = document.getElementById('rerunCandidateList');
@@ -443,7 +443,7 @@
             fetch('/api/update_tag', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ track_uid: currentTrackUid, spotify_id: spotifyId })
+                body: JSON.stringify({ track_uid: currentTrackUid, music_id: musicId })
             })
             .then(res => res.json())
             .then(data => {
@@ -452,15 +452,11 @@
                     if (row) {
                         row.className = "";
                         
-                        // Update Cover
-                        row.cells[0].innerHTML = data.result.spotify_cover ? `<img src="${data.result.spotify_cover}" class="table-img">` : '';
-
-                        // Update Artist & Title
-                        row.querySelector('.spotify-artist').innerText = data.result.spotify_artist || '';
-                        row.querySelector('.spotify-title').innerText = data.result.spotify_title || '';
+                        row.cells[0].innerHTML = data.result.api_cover ? `<img src="${data.result.api_cover}" class="table-img">` : '';
+                        row.querySelector('.api-artist').innerText = data.result.api_artist || '';
+                        row.querySelector('.api-title').innerText = data.result.api_title || '';
                         
                         row.querySelector('.status-cell').innerText = "Success";
-                        // Update score to 100% since it was manual
                         if (data.result.match_score) {
                             row.querySelector('.score-cell').innerText = Math.round(data.result.match_score * 100) + '%';
                         }

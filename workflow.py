@@ -13,7 +13,7 @@ import yt_dlp as ytdlp
 from services.downloader import Downloader
 from services.processor import AudioProcessor
 from services.sponsorblock import SponsorBlockClient
-from services.spotify import SpotifyClient
+from services.ytmusic import YTMusicClient
 from utils import OperationCancelled
 
 
@@ -54,7 +54,7 @@ class WorkflowManager:
         self.tracks = loaded_state.get("tracks", {})
         self.logs = loaded_state.get("logs", [])
 
-        self.spotify = SpotifyClient()
+        self.ytmusic = YTMusicClient()
         self.sponsorblock = SponsorBlockClient()
         self.downloader = Downloader(self.output_dir, self.cancel_event)
         self.processor = AudioProcessor()
@@ -111,7 +111,7 @@ class WorkflowManager:
             print(f"[System] Load error: {e}")
             return {"tracks": {}, "logs": []}
 
-    # --- NEW: Broadcasting System ---
+    # --- Broadcasting System ---
 
     def _broadcast(self, message_data: Dict):
         """Sends a message to all active listeners and saves to log."""
@@ -124,9 +124,7 @@ class WorkflowManager:
 
             # Add to history (only messages with text)
             if message_data.get("message"):
-                # Add timestamp/style if needed, or just store the raw dict
                 self.logs.append(message_data)
-                # Auto-save occasionally? For now, we save on specific events or exit.
 
         # Push to all active queues
         dead_listeners = []
@@ -166,7 +164,7 @@ class WorkflowManager:
         """Returns the complete data needed to restore the UI."""
         with self.state_lock:
             return {
-                "tracks": self.tracks,  # Flask jsonify handles dicts
+                "tracks": self.tracks,
                 "logs": self.logs,
                 "is_active": self.is_active,
                 "current_progress": self.current_progress,
@@ -211,14 +209,25 @@ class WorkflowManager:
         executor = None
 
         try:
-            with ytdlp.YoutubeDL({"extract_flat": True, "quiet": True}) as ydl:
+            # FIX: Explicitly set noplaylist to False and use in_playlist
+            # to properly parse playlist URLs and mixed watch?v=&list= URLs.
+            ydl_opts = {
+                "extract_flat": "in_playlist",
+                "quiet": True,
+                "noplaylist": False,
+                "ignoreerrors": True,  # Ignores deleted/private videos in playlists
+            }
+            with ytdlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
 
-            entries = info.get("entries") if "entries" in info else [info]
-            entries = [e for e in entries if e]
-            total = len(entries)
+            if not info:
+                raise ValueError("Could not extract info from URL.")
 
+            # Identify if it is a playlist or single song
             if "entries" in info:
+                # Remove None entries (caused by ignoreerrors=True on deleted videos)
+                entries = [e for e in info["entries"] if e]
+                total = len(entries)
                 self._broadcast(
                     {
                         "status": "processing",
@@ -226,6 +235,9 @@ class WorkflowManager:
                         "progress": 0,
                     }
                 )
+            else:
+                entries = [info]
+                total = 1
 
             msg_queue = queue.Queue()
             executor = ThreadPoolExecutor(max_workers=self.MAX_WORKERS)
@@ -454,26 +466,23 @@ class WorkflowManager:
 
         self.check_cancel()
 
-        # Change: Always create a 'processed' file to apply normalization
         processed_file = raw_file.with_name(f"{raw_file.stem}_processed.opus")
-
-        # If good_segments represents the whole file, it just normalizes.
-        # If it contains specific segments, it cuts AND normalizes.
         self.processor.cut_audio(raw_file, processed_file, good_segments)
 
-        # Clean up the raw download and rename processed file
         raw_file.unlink()
         processed_file.rename(raw_file)
 
         return raw_file
 
-    def rerun_spotify_search(self, track_uid: str, custom_query: str = None) -> Dict:
+    def rerun_music_search(self, track_uid: str, custom_query: str = None) -> Dict:
         with self.state_lock:
             if track_uid not in self.tracks:
                 raise ValueError("Track not found.")
             track = self.tracks[track_uid]
+
         self.cancel_event.clear()
         search_title = track["youtube_title"]
+
         if custom_query:
             query_to_use = custom_query
             query_display = custom_query
@@ -481,26 +490,38 @@ class WorkflowManager:
             uploader = track["video_info"].get("uploader")
             query_to_use = f"{search_title} - {uploader}" if uploader else search_title
             query_display = query_to_use
-        search_res = self.spotify.search_raw(query_to_use, original_title=search_title)
+
+        search_res = self.ytmusic.search_raw(query_to_use, original_title=search_title)
+
         with self.state_lock:
             self.tracks[track_uid]["candidates"] = search_res["candidates"]
             self._save_state()
+
         return {"query_used": query_display, "candidates": search_res["candidates"]}
 
-    def update_track_tags(self, track_uid: str, spotify_id: str) -> Dict:
+    def update_track_tags(self, track_uid: str, music_id: str) -> Dict:
         with self.state_lock:
             if track_uid not in self.tracks:
                 raise ValueError("Track not found.")
             track_data = self.tracks[track_uid]
+
         self.cancel_event.clear()
-        new_meta = self.spotify.get_track_metadata(spotify_id)
-        tags = new_meta["tags"]
+
+        candidate = next(
+            (c for c in track_data.get("candidates", []) if c["id"] == music_id), None
+        )
+        if not candidate:
+            raise ValueError("Candidate metadata not found. Please refresh search.")
+
+        tags = candidate["tags"]
+
         if self.processor.check_duplicate(
             tags["Title"], tags["Artist"], tags.get("Album", "")
         ):
             raise ValueError(
                 f"Track '{tags['Title']} - {tags['Artist']}' already exists."
             )
+
         if track_data.get("path") and track_data["path"].exists():
             new_path = self.processor.tag_audio(track_data["path"], tags)
         else:
@@ -508,17 +529,19 @@ class WorkflowManager:
                 track_data["url"], track_data["video_info"]
             )
             new_path = self.processor.tag_audio(untagged_file, tags)
+
         with self.state_lock:
             self.tracks[track_uid]["path"] = new_path
             self.tracks[track_uid]["status"] = "success"
             self.tracks[track_uid]["best_match_tags"] = tags
-            self.tracks[track_uid]["match_score"] = 1.0  # Manual selection = 100%
+            self.tracks[track_uid]["match_score"] = 1.0
             self._save_state()
+
         return {
             "new_filename": new_path.name,
-            "spotify_title": tags["Title"],
-            "spotify_artist": tags["Artist"],
-            "spotify_cover": tags.get("Album Cover Art"),
+            "api_title": tags["Title"],
+            "api_artist": tags["Artist"],
+            "api_cover": tags.get("Album Cover Art"),
             "match_score": 1.0,
         }
 
@@ -547,11 +570,19 @@ class WorkflowManager:
         title = pre_info.get("title", "Unknown")
         try:
             if not pre_info.get("duration"):
-                with ytdlp.YoutubeDL({"quiet": True}) as ydl:
+                # FIX: Must set noplaylist=True here so we don't accidentally
+                # download metadata for an entire playlist for EVERY single video inside it!
+                ydl_opts = {"quiet": True, "noplaylist": True, "ignoreerrors": True}
+                with ytdlp.YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(url, download=False)
+
+                if not info:
+                    raise ValueError("Video unavailable or deleted.")
             else:
                 info = pre_info
+
             title = info.get("title", "Unknown")
+
             with self.state_lock:
                 self.tracks[track_uid] = {
                     "video_info": info,
@@ -572,6 +603,7 @@ class WorkflowManager:
                 }
             )
             yield from self._process_track_execution(track_uid, base_progress)
+
         except Exception as e:
             if isinstance(e, OperationCancelled):
                 raise e
@@ -600,27 +632,25 @@ class WorkflowManager:
         url = track["url"]
         info = track["video_info"]
         try:
-            spotify_result = None
-            candidates = []
+            music_result = None
             tags = None
             match_score = 0.0
             last_error = None
             for attempt in range(1, self.MAX_SEARCH_ATTEMPTS + 1):
                 self.check_cancel()
                 try:
-                    search_res = self.spotify.search_tracks(
+                    search_res = self.ytmusic.search_tracks(
                         title, uploader, attempt=attempt
                     )
                     if search_res["best_match"]:
-                        spotify_result = search_res["best_match"]
-                        tags = spotify_result["tags"]
-                        # The modified Spotify client returns the score in the metadata
-                        match_score = spotify_result.get("score", 0.0)
+                        music_result = search_res["best_match"]
+                        tags = music_result["tags"]
+                        match_score = music_result.get("score", 0.0)
                         candidates = search_res["candidates"]
                         break
                     candidates = search_res["candidates"]
                 except Exception as e:
-                    last_error = f"Spotify Error: {str(e)}"
+                    last_error = f"YTMusic Error: {str(e)}"
                     yield json.dumps(
                         {
                             "status": "warning",
@@ -634,7 +664,7 @@ class WorkflowManager:
                 self.tracks[track_uid]["best_match_tags"] = tags
                 self.tracks[track_uid]["match_score"] = match_score
 
-            if not spotify_result:
+            if not music_result:
                 with self.state_lock:
                     self.tracks[track_uid]["status"] = "error"
                     self._save_state()
@@ -655,6 +685,7 @@ class WorkflowManager:
                 with self.state_lock:
                     self.tracks[track_uid]["status"] = "skipped"
                     self._save_state()
+
                 yield json.dumps(
                     {
                         "status": "skipped",
@@ -662,9 +693,9 @@ class WorkflowManager:
                         "progress": base_progress,
                         "track_uid": track_uid,
                         "youtube_title": title,
-                        "spotify_title": tags["Title"],
-                        "spotify_artist": tags["Artist"],
-                        "spotify_cover": tags.get("Album Cover Art"),
+                        "api_title": tags["Title"],
+                        "api_artist": tags["Artist"],
+                        "api_cover": tags.get("Album Cover Art"),
                         "match_score": match_score,
                     }
                 )
@@ -677,22 +708,25 @@ class WorkflowManager:
                     "progress": base_progress,
                 }
             )
+
             self.check_cancel()
             final_file = self._download_and_process(url, info)
             final_file = self.processor.tag_audio(final_file, tags)
+
             with self.state_lock:
                 self.tracks[track_uid]["path"] = final_file
                 self.tracks[track_uid]["status"] = "success"
                 self._save_state()
+
             yield json.dumps(
                 {
                     "status": "success",
                     "message": f"Saved: {final_file.name}",
                     "track_uid": track_uid,
                     "youtube_title": title,
-                    "spotify_title": tags["Title"],
-                    "spotify_artist": tags["Artist"],
-                    "spotify_cover": tags.get("Album Cover Art"),
+                    "api_title": tags["Title"],
+                    "api_artist": tags["Artist"],
+                    "api_cover": tags.get("Album Cover Art"),
                     "match_score": match_score,
                     "progress": base_progress,
                 }
