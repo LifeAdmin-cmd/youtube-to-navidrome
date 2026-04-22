@@ -21,10 +21,6 @@ class AudioProcessor:
     ):
         cmd = ["ffmpeg", "-y", "-i", str(input_path)]
 
-        # Target -2dB True Peak using loudnorm
-        # I=-16 is a standard integrated loudness target for web/mobile
-        norm_filter = "loudnorm=I=-16:TP=-2:LRA=11"
-
         if segments:
             filter_parts = []
             input_labels = []
@@ -36,26 +32,29 @@ class AudioProcessor:
                 input_labels.append(f"[{label}]")
 
             concat_cmd = (
-                f"{''.join(input_labels)}concat=n={len(input_labels)}:v=0:a=1[cuta]"
+                f"{''.join(input_labels)}concat=n={len(input_labels)}:v=0:a=1[outa]"
             )
-            # Chain the cut audio into loudnorm
-            full_filter = (
-                f"{';'.join(filter_parts)};{concat_cmd};[cuta]{norm_filter}[outa]"
+            full_filter = f"{';'.join(filter_parts)};{concat_cmd}"
+
+            # Since we are using filter_complex to cut, FFmpeg decodes the audio.
+            # We must re-encode it back to opus at our target 192k quality.
+            cmd.extend(
+                [
+                    "-filter_complex",
+                    full_filter,
+                    "-map",
+                    "[outa]",
+                    "-c:a",
+                    "libopus",
+                    "-b:a",
+                    "192k",
+                    "-vn",
+                    str(output_path),
+                ]
             )
         else:
-            # Just normalize the original stream
-            full_filter = f"[0:a]{norm_filter}[outa]"
-
-        cmd.extend(
-            [
-                "-filter_complex",
-                full_filter,
-                "-map",
-                "[outa]",
-                "-vn",
-                str(output_path),
-            ]
-        )
+            # If no SponsorBlock cuts are needed, just copy the raw audio stream perfectly
+            cmd.extend(["-c:a", "copy", "-vn", str(output_path)])
 
         subprocess.run(
             cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT
@@ -126,6 +125,22 @@ class AudioProcessor:
             )
 
             file_path.rename(new_path)
+
+            # --- REPLAYGAIN INTEGRATION ---
+            try:
+                # -I writes standard ID3v2/APEv2/FLAC/Ogg tags
+                # -s e forces standard EBU R128 tag names
+                subprocess.run(
+                    ["loudgain", "-I", "-s", "e", str(new_path)],
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.STDOUT,
+                )
+                print(f"[Tagging] Applied ReplayGain to {new_path.name}")
+            except Exception as e:
+                print(f"[Tagging] ReplayGain error: {e}")
+            # ----------------------------------
+
             return new_path
 
         except Exception as e:

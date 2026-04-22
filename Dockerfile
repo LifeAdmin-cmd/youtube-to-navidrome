@@ -4,7 +4,7 @@ WORKDIR /app
 
 # System-Abhängigkeiten
 RUN apt-get update && \
-    apt-get install -y ffmpeg nodejs && \
+    apt-get install -y ffmpeg nodejs loudgain && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 

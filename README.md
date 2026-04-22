@@ -7,6 +7,7 @@ A web-based tool to download music from YouTube, automatically clean up segments
 * **YouTube Download:** Downloads audio from YouTube videos or entire playlists.
 * **SponsorBlock Integration:** Automatically removes non-music segments like intros, outros, and self-promotions.
 * **YTMusic Auto-Tagging:** Fetches accurate metadata (Artist, Title, Album, Cover Art) directly from YouTube Music.
+* **ReplayGain** Automatically adds ReplayGain Tags to downlaoded music
 * **Duplicate Detection:** Checks your existing Navidrome SQLite database to prevent downloading tracks that are already in your library.
 * **Web Interface:** Simple UI to monitor progress, review tags, and retry failed downloads.
 
