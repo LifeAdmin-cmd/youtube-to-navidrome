@@ -5,3 +5,4 @@ mutagen
 python-dotenv
 flask
 ytmusicapi
+gunicorn

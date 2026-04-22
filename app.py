@@ -48,9 +48,21 @@ def get_state():
 def start_process():
     """Starts the download workflow in the background."""
     data = request.json
-    youtube_url = data.get("url")
+    youtube_url = data.get("url", "").strip()
+
+    # Security Fix: Basic URL Validation to prevent SSRF/Command injection quirks
     if not youtube_url:
         return jsonify({"status": "error", "message": "No URL provided"}), 400
+    if not youtube_url.startswith(("http://", "https://")):
+        return (
+            jsonify(
+                {
+                    "status": "error",
+                    "message": "Invalid URL format. Must start with http or https.",
+                }
+            ),
+            400,
+        )
 
     try:
         manager.start_processing(youtube_url)
@@ -160,4 +172,4 @@ def rerun_search(track_uid):
 # For now, UI will likely use /api/state.
 
 if __name__ == "__main__":
-    app.run(debug=True, host="0.0.0.0", port=5000)
+    app.run(debug=False, host="0.0.0.0", port=5000)
